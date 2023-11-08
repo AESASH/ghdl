@@ -60,6 +60,7 @@ def find_def(n, loc):
         nodes.Iir_Kind.Less_Than_Operator,
         nodes.Iir_Kind.Greater_Than_Operator,
     ):
+        # One character operators
         n_loc = nodes.Get_Location(n)
         if loc == n_loc:
             return n
@@ -71,6 +72,7 @@ def find_def(n, loc):
         nodes.Iir_Kind.Condition_Operator,
         nodes.Iir_Kind.Exponentiation_Operator,
     ):
+        # Two characters operators
         n_loc = nodes.Get_Location(n)
         if n_loc <= loc <= n_loc + 1:
             return n
@@ -89,6 +91,7 @@ def find_def(n, loc):
         nodes.Iir_Kind.Modulus_Operator,
         nodes.Iir_Kind.Remainder_Operator,
     ):
+        # Three characters operators
         n_loc = nodes.Get_Location(n)
         if n_loc <= loc <= n_loc + 2:
             return n
@@ -96,6 +99,7 @@ def find_def(n, loc):
         nodes.Iir_Kind.Nand_Operator,
         nodes.Iir_Kind.Xnor_Operator,
     ):
+        # Four characters operators
         n_loc = nodes.Get_Location(n)
         if n_loc <= loc <= n_loc + 3:
             return n
@@ -119,8 +123,8 @@ def find_def(n, loc):
                     if res is not None:
                         return res
         elif typ == nodes_meta.types.Iir_List:
-            attr = nodes_meta.get_field_attribute(f)
-            if attr == nodes_meta.Attr.ANone:
+            # Only sensitivity lists are interesting.
+            if f == nodes_meta.fields.Sensitivity_List:
                 for n1 in pyutils.list_iter(nodes_meta.Get_Iir_List(n, f)):
                     res = find_def(n1, loc)
                     if res is not None:

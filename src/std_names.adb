@@ -698,11 +698,15 @@ package body Std_Names is
       Def ("ceil",               Name_Ceil);
       Def ("floor",              Name_Floor);
       Def ("round",              Name_Round);
+      Def ("exp",                Name_Exp);
+      Def ("log",                Name_Log);
       Def ("log2",               Name_Log2);
       Def ("log10",              Name_Log10);
       Def ("sin",                Name_Sin);
       Def ("cos",                Name_Cos);
       Def ("arctan",             Name_Arctan);
+      Def ("sinh",               Name_Sinh);
+      Def ("cosh",               Name_Cosh);
       Def ("sign",               Name_Sign);
       Def ("sqrt",               Name_Sqrt);
       Def ("shl",                Name_Shl);
@@ -742,8 +746,10 @@ package body Std_Names is
 
       --  Verilog system tasks
       Def ("bits",            Name_Bits);
+      Def ("cast",            Name_Cast);
       Def ("$root",           Name_D_Root);
       Def ("$unit",           Name_D_Unit);
+      Def ("typename",        Name_Typename);
 
       --  SV methods.
       Def ("size",             Name_Size);
@@ -755,10 +761,24 @@ package body Std_Names is
       Def ("push_back",        Name_Push_Back);
       Def ("name",             Name_Name);
       Def ("len",              Name_Len);
+      Def ("putc",             Name_Putc);
+      Def ("getc",             Name_Getc);
+      Def ("toupper",          Name_Toupper);
+      Def ("tolower",          Name_Tolower);
+      Def ("compare",          Name_Compare);
+      Def ("icompare",         Name_Icompare);
       Def ("substr",           Name_Substr);
       Def ("exists",           Name_Exists);
       Def ("atoi",             Name_Atoi);
+      Def ("atohex",           Name_Atohex);
+      Def ("atooct",           Name_Atooct);
+      Def ("atobin",           Name_Atobin);
+      Def ("atoreal",          Name_Atoreal);
       Def ("itoa",             Name_Itoa);
+      Def ("hextoa",           Name_Hextoa);
+      Def ("octtoa",           Name_Octtoa);
+      Def ("bintoa",           Name_Bintoa);
+      Def ("realtoa",          Name_Realtoa);
       Def ("find",             Name_Find);
       Def ("find_index",       Name_Find_Index);
       Def ("find_first",       Name_Find_First);
@@ -766,6 +786,10 @@ package body Std_Names is
       Def ("find_last",        Name_Find_Last);
       Def ("find_last_index",  Name_Find_Last_Index);
       Def ("num",              Name_Num);
+      Def ("sort",             Name_Sort);
+      Def ("rsort",            Name_Rsort);
+      Def ("shuffle",          Name_Shuffle);
+      Def ("rand_mode",        Name_Rand_Mode);
       Def ("randomize",        Name_Randomize);
       Def ("pre_randomize",    Name_Pre_Randomize);
       Def ("post_randomize",   Name_Post_Randomize);
@@ -774,6 +798,7 @@ package body Std_Names is
       Def ("set_randstate",    Name_Set_Randstate);
       Def ("seed",             Name_Seed);
       Def ("state",            Name_State);
+      Def ("triggered",        Name_Triggered);
 
       --  BSV keywords
       Def ("Action",         Name_uAction);

@@ -14,6 +14,7 @@
 --  You should have received a copy of the GNU General Public License
 --  along with this program.  If not, see <gnu.org/licenses>.
 with Ada.Characters.Latin_1; use Ada.Characters.Latin_1;
+with Grt.Vstrings;
 with Errorout; use Errorout;
 with Name_Table;
 with Files_Map; use Files_Map;
@@ -992,12 +993,6 @@ package body Vhdl.Scanner is
       --  Not a letter.
       others => NUL);
 
-   procedure Error_Too_Long is
-   begin
-      Error_Msg_Scan ("identifier is too long (>"
-                        & Natural'Image (Max_Name_Length - 1) & ")");
-   end Error_Too_Long;
-
    -- LRM93 13.3.1
    -- Basic Identifiers
    -- A basic identifier consists only of letters, digits, and underlines.
@@ -1009,15 +1004,19 @@ package body Vhdl.Scanner is
    -- character for a basic identifier.
    procedure Scan_Identifier (Allow_PSL : Boolean)
    is
+      use Grt.Vstrings;
       use Name_Table;
       --  Local copy for speed-up.
       Source : constant File_Buffer_Acc := Current_Context.Source;
       P : Source_Ptr;
 
-      --  Current and next character.
+      --  Current character.
       C : Character;
 
-      Buffer : String (1 .. Max_Name_Length);
+      Prev_C : Character;
+
+      Vbuf : Vstring (0);
+      Buffer : String (1 .. 128);
       Len : Natural;
    begin
       -- This is an identifier or a key word.
@@ -1071,32 +1070,32 @@ package body Vhdl.Scanner is
 
          --  Put character in name buffer.  FIXME: compute the hash at the same
          --  time ?
-         if Len >= Max_Name_Length - 1 then
-            if Len = Max_Name_Length -1 then
-               Error_Msg_Scan ("identifier is too long (>"
-                                 & Natural'Image (Max_Name_Length - 1) & ")");
-               --  Accept this last one character, so that no error for the
-               --  following characters.
-               Len := Len + 1;
-               Buffer (Len) := C;
-            end if;
-         else
-            Len := Len + 1;
+         Len := Len + 1;
+         if Len <= Buffer'Length then
             Buffer (Len) := C;
+         else
+            if Len = Buffer'Length + 1 then
+               Append (Vbuf, Buffer);
+            end if;
+            Append (Vbuf, C);
          end if;
 
          --  Next character.
          P := P + 1;
       end loop;
 
-      if Source (P - 1) = '_' then
+      --  P points to the next character.
+      if Source (P - 1) = '_' and Len > 1 then
+         --  The identifier ends with '_'.
          if Allow_PSL then
             --  Some PSL reserved words finish with '_'.
+            --  Do not scan the '_', so remove it from the identifier.
             P := P - 1;
             Len := Len - 1;
             C := '_';
          else
             --  Eat the trailing underscore.
+            --  Set POS for the message.
             Pos := P - 1;
             Error_Msg_Scan ("an identifier cannot finish with '_'");
          end if;
@@ -1142,6 +1141,7 @@ package body Vhdl.Scanner is
                   Cl : constant Character := Buffer (Len);
                   Cf : constant Character := Buffer (1);
                begin
+                  --  Note: no need to free Buffer, as LEN <= 2.
                   Current_Context.Bit_Str_Base := Cl;
                   if Cl = 'b' then
                      Base := 1;
@@ -1180,8 +1180,13 @@ package body Vhdl.Scanner is
             --  It's possible because in the sequence of UTF-8 bytes for the
             --  quote marks, there are invalid character (in the 128-160
             --  range).
+            if Len <= Buffer'Length then
+               Prev_C := Buffer (Len);
+            else
+               Prev_C := Get_C_String (Vbuf) (Len);
+            end if;
             if C = Character'Val (16#80#)
-              and then Buffer (Len) = Character'Val (16#e2#)
+              and then Prev_C = Character'Val (16#e2#)
               and then (Source (Pos + 1) = Character'Val (16#98#)
                           or else Source (Pos + 1) = Character'Val (16#99#))
             then
@@ -1229,8 +1234,15 @@ package body Vhdl.Scanner is
       end case;
 
       -- Hash it.
-      Current_Context.Identifier := Get_Identifier (Buffer (1 .. Len));
+      if Len <= Buffer'Length then
+         Current_Context.Identifier := Get_Identifier (Buffer (1 .. Len));
+      else
+         Current_Context.Identifier := Get_Identifier
+           (Get_C_String (Vbuf) (1 .. Len));
+         Free (Vbuf);
+      end if;
       Current_Token := Tok_Identifier;
+
    end Scan_Identifier;
 
    procedure Scan_Psl_Keyword_Em (Tok : Token_Type; Tok_Em : Token_Type) is
@@ -1477,8 +1489,9 @@ package body Vhdl.Scanner is
    --  backslashes, doubling backslashes inside).
    procedure Scan_Extended_Identifier
    is
+      use Grt.Vstrings;
       use Name_Table;
-      Buffer : String (1 .. Max_Name_Length);
+      Buffer : Vstring (128);
       Len : Natural;
       C : Character;
    begin
@@ -1487,7 +1500,7 @@ package body Vhdl.Scanner is
       --  identifier.
       --  GHDL: This is satisfied by storing '\' in the name table.
       Len := 1;
-      Buffer (1) := '\';
+      Append (Buffer, "\");
       loop
          --  Next character.
          Pos := Pos + 1;
@@ -1499,17 +1512,8 @@ package body Vhdl.Scanner is
             --  of an extended literal, it must be doubled.
             --  LRM93 13.3.2
             --  (a doubled backslash couting as one character)
-            if Len >= Max_Name_Length - 1 then
-               if Len = Max_Name_Length - 1 then
-                  Error_Too_Long;
-                  --  Accept this last one.
-                  Len := Len + 1;
-                  Buffer (Len) := C;
-               end if;
-            else
-               Len := Len + 1;
-               Buffer (Len) := C;
-            end if;
+            Len := Len + 1;
+            Append (Buffer, C);
 
             Pos := Pos + 1;
             C := Source (Pos);
@@ -1541,17 +1545,8 @@ package body Vhdl.Scanner is
          --  LRM93 13.3.2
          --  Extended identifiers differing only in the use of corresponding
          --  upper and lower case letters are distinct.
-         if Len >= Max_Name_Length - 1 then
-            if Len = Max_Name_Length - 1 then
-               Error_Too_Long;
-               --  Accept this last one.
-               Len := Len + 1;
-               Buffer (Len) := C;
-            end if;
-         else
-            Len := Len + 1;
-            Buffer (Len) := C;
-         end if;
+         Len := Len + 1;
+         Append (Buffer, C);
       end loop;
 
       if Len <= 2 then
@@ -1575,8 +1570,11 @@ package body Vhdl.Scanner is
       end case;
 
       -- Hash it.
-      Current_Context.Identifier := Get_Identifier (Buffer (1 .. Len));
+      Current_Context.Identifier := Get_Identifier
+         (Get_C_String (Buffer) (1 .. Len));
       Current_Token := Tok_Identifier;
+
+      Free (Buffer);
    end Scan_Extended_Identifier;
 
    procedure Convert_Identifier (Str : in out String; Err : out Boolean)
@@ -1716,12 +1714,13 @@ package body Vhdl.Scanner is
       end loop;
    end Skip_Until_EOL;
 
-   --  Scan an identifier within a comment.  Only lower case letters are
-   --  allowed.
-   procedure Scan_Comment_Identifier (Id : out Name_Id; Create : Boolean)
+   --  Scan an identifier within a comment.
+   --  The longest identifier is "label_applies_to" (16 characters).
+   procedure Scan_Comment_Identifier (Id : out Name_Id)
    is
       use Name_Table;
-      Buffer : String (1 .. Max_Name_Length);
+      --  No need to use unlimited strings, the identifiers are recognized.
+      Buffer : String (1 .. 20);
       Len : Natural;
       C : Character;
    begin
@@ -1754,6 +1753,11 @@ package body Vhdl.Scanner is
          Len := Len + 1;
          Buffer (Len) := C;
          Pos := Pos + 1;
+
+         --  Comment identifiers are not very long...
+         if Len >= Buffer'Length then
+            return;
+         end if;
       end loop;
 
       --  Shall be followed by a space or a new line.
@@ -1761,11 +1765,7 @@ package body Vhdl.Scanner is
          return;
       end if;
 
-      if Create then
-         Id := Get_Identifier (Buffer (1 .. Len));
-      else
-         Id := Get_Identifier_No_Create (Buffer (1 .. Len));
-      end if;
+      Id := Get_Identifier_No_Create (Buffer (1 .. Len));
    end Scan_Comment_Identifier;
 
    package Directive_Protect is
@@ -1887,13 +1887,10 @@ package body Vhdl.Scanner is
       use Std_Names;
       Id : Name_Id;
    begin
-      Scan_Comment_Identifier (Id, True);
+      Scan_Comment_Identifier (Id);
       case Id is
-         when Null_Identifier =>
-            Warning_Msg_Scan
-              (Warnid_Pragma, "incomplete pragma directive ignored");
          when Name_Translate =>
-            Scan_Comment_Identifier (Id, False);
+            Scan_Comment_Identifier (Id);
             case Id is
                when Name_On =>
                   Scan_Translate_On;
@@ -1920,7 +1917,8 @@ package body Vhdl.Scanner is
             Skip_Until_EOL;
          when others =>
             Warning_Msg_Scan
-              (Warnid_Pragma, "unknown pragma %i ignored", +Id);
+              (Warnid_Pragma,
+               "incomplete or unknown pragma directive ignored");
       end case;
    end Scan_Comment_Pragma;
 
@@ -1931,7 +1929,7 @@ package body Vhdl.Scanner is
       use Std_Names;
       Id : Name_Id;
    begin
-      Scan_Comment_Identifier (Id, False);
+      Scan_Comment_Identifier (Id);
 
       if Id = Null_Identifier then
          return False;

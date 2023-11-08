@@ -892,6 +892,15 @@ package body Synth.Vhdl_Oper is
          return Create_Value_Net (Edge, Res_Typ);
       end Synth_Posedge;
 
+      function Synth_Negedge return Valtyp
+      is
+         Edge : Net;
+      begin
+         Edge := Build_Negedge (Ctxt, Get_Net (Ctxt, L));
+         Set_Location (Edge, Expr);
+         return Create_Value_Net (Edge, Res_Typ);
+      end Synth_Negedge;
+
       function Error_Unhandled return Valtyp is
       begin
          Error_Msg_Synth
@@ -921,7 +930,7 @@ package body Synth.Vhdl_Oper is
                return Create_Value_Memtyp
                  (Hook_Bit_Falling_Edge.all (L, Res_Typ));
             end if;
-            raise Internal_Error;
+            return Synth_Negedge;
          when Iir_Predefined_Ieee_1164_Rising_Edge =>
             if Hook_Std_Rising_Edge /= null then
                return Create_Value_Memtyp
@@ -933,13 +942,7 @@ package body Synth.Vhdl_Oper is
                return Create_Value_Memtyp
                  (Hook_Std_Falling_Edge.all (L, Res_Typ));
             end if;
-            declare
-               Edge : Net;
-            begin
-               Edge := Build_Negedge (Ctxt, Get_Net (Ctxt, L));
-               Set_Location (Edge, Expr);
-               return Create_Value_Net (Edge, Res_Typ);
-            end;
+            return Synth_Negedge;
 
          when Iir_Predefined_Ieee_1164_Scalar_Not =>
             return Synth_Bit_Monadic (Id_Not);
@@ -1201,8 +1204,8 @@ package body Synth.Vhdl_Oper is
                   Cst := R;
                   Oper := L;
                else
-                  Warning_Msg_Synth
-                    (+Expr, "no operand of ?= is constant, handled like =");
+                  --  There was a warning as '?=' is handled like '=',
+                  --  but the result is std_logic - so still useful.
                   return Synth_Compare (Id_Eq, Logic_Type);
                end if;
                Res := Synth_Match (Ctxt, Cst, Oper, Expr);
@@ -1230,8 +1233,6 @@ package body Synth.Vhdl_Oper is
                   Cst := R;
                   Oper := L;
                else
-                  Warning_Msg_Synth
-                    (+Expr, "no operand of ?/= is constant, handled like /=");
                   return Synth_Compare (Id_Ne, Logic_Type);
                end if;
                Res := Synth_Match (Ctxt, Cst, Oper, Expr, Id_Ne);
@@ -1268,7 +1269,7 @@ package body Synth.Vhdl_Oper is
                Result_Typ : Type_Acc;
                N : Net;
             begin
-               Check_Matching_Bounds (Le_Typ, R.Typ, Expr);
+               Check_Matching_Bounds (Syn_Inst, Le_Typ, R.Typ, Expr);
                N := Build2_Concat2 (Ctxt, Ln, Get_Net (Ctxt, R));
                Set_Location (N, Expr);
                Bnd := Create_Bounds_From_Length
@@ -1291,7 +1292,7 @@ package body Synth.Vhdl_Oper is
                Result_Typ : Type_Acc;
                N : Net;
             begin
-               Check_Matching_Bounds (L.Typ, Re_Typ, Expr);
+               Check_Matching_Bounds (Syn_Inst, L.Typ, Re_Typ, Expr);
                N := Build2_Concat2 (Ctxt, Get_Net (Ctxt, L), Rn);
                Set_Location (N, Expr);
                Bnd := Create_Bounds_From_Length
@@ -1312,7 +1313,7 @@ package body Synth.Vhdl_Oper is
                Bnd : Bound_Type;
                Result_Typ : Type_Acc;
             begin
-               Check_Matching_Bounds (L.Typ, R.Typ, Expr);
+               Check_Matching_Bounds (Syn_Inst, L.Typ, R.Typ, Expr);
                N := Build2_Concat2
                  (Ctxt, Get_Net (Ctxt, L), Get_Net (Ctxt, R));
                Set_Location (N, Expr);
@@ -1335,7 +1336,7 @@ package body Synth.Vhdl_Oper is
                Result_Typ : Type_Acc;
                N : Net;
             begin
-               Check_Matching_Bounds (Le_Typ, Re_Typ, Expr);
+               Check_Matching_Bounds (Syn_Inst, Le_Typ, Re_Typ, Expr);
                N := Build2_Concat2 (Ctxt, Ln, Rn);
                Set_Location (N, Expr);
                Bnd := Create_Bounds_From_Length
@@ -1382,6 +1383,21 @@ package body Synth.Vhdl_Oper is
          when Iir_Predefined_Integer_Rem =>
             return Synth_Int_Dyadic (Id_Srem);
          when Iir_Predefined_Integer_Exp =>
+            if Is_Static_Val (L.Val) then
+               --  Support 2**X
+               declare
+                  Lint : constant Int64 := Get_Static_Discrete (L);
+                  N : Net;
+               begin
+                  if Lint = 2 then
+                     N := Build_Const_UB32 (Ctxt, 1, L.Typ.W);
+                     N := Build_Shift_Rotate
+                       (Ctxt, Id_Lsl, N, Get_Net (Ctxt, R));
+                     Set_Location (N, Expr);
+                     return Create_Value_Net (N, Res_Typ);
+                  end if;
+               end;
+            end if;
             Error_Msg_Synth
               (Syn_Inst, Expr, "non-constant exponentiation not supported");
             return No_Valtyp;
@@ -2060,6 +2076,7 @@ package body Synth.Vhdl_Oper is
               (Synth_Sresize (Ctxt, L, Res_Typ.W, Expr), Res_Typ);
 
          when Iir_Predefined_Ieee_Numeric_Std_Resize_Uns_Nat
+            | Iir_Predefined_Ieee_Numeric_Std_Unsigned_Resize_Slv_Nat
             | Iir_Predefined_Ieee_Std_Logic_Arith_Conv_Vector_Uns
             | Iir_Predefined_Ieee_Std_Logic_Arith_Conv_Unsigned_Uns
             | Iir_Predefined_Ieee_Std_Logic_Arith_Conv_Unsigned_Log

@@ -4631,16 +4631,21 @@ package body Trans.Chap8 is
          if Target_Tinfo.Type_Mode in Type_Mode_Unbounded then
             pragma Assert (not Constrained);
             --  Unbounded array, allocate bounds.
-            pragma Assert (Target_Tinfo.S.Composite_Layout = Null_Var);
-            Target_Tinfo.S.Composite_Layout :=
-              Create_Var (Create_Uniq_Identifier, Target_Tinfo.B.Layout_Type,
-                          O_Storage_Local);
-            Layout := Lv2M (Get_Var (Target_Tinfo.S.Composite_Layout),
-                            Target_Tinfo,
-                            Mode_Value,
-                            Target_Tinfo.B.Layout_Type,
-                            Target_Tinfo.B.Layout_Ptr_Type);
-            Bounds := Stabilize (Chap3.Layout_To_Bounds (Layout));
+
+            if Get_Literal_Subtype (Target) /= Null_Iir then
+               pragma Assert (Target_Tinfo.S.Composite_Layout = Null_Var);
+               Target_Tinfo.S.Composite_Layout :=
+                 Create_Var (Create_Uniq_Identifier,
+                             Target_Tinfo.B.Layout_Type, O_Storage_Local);
+               Layout := Lv2M (Get_Var (Target_Tinfo.S.Composite_Layout),
+                               Target_Tinfo,
+                               Mode_Value,
+                               Target_Tinfo.B.Layout_Type,
+                               Target_Tinfo.B.Layout_Ptr_Type);
+               Bounds := Stabilize (Chap3.Layout_To_Bounds (Layout));
+            else
+               Bounds := Create_Temp_Bounds (Target_Tinfo);
+            end if;
             New_Assign_Stmt (M2Lp (Chap3.Get_Composite_Bounds (Targ)),
                              M2Addr (Bounds));
             --  Build bounds from aggregate.
@@ -5045,7 +5050,7 @@ package body Trans.Chap8 is
       Gen_Signal_Force (Targ, Target_Type, M2E (Value));
    end Translate_Signal_Force_Assignment_Statement;
 
-   --  Free the statement createed by Canon for a conditional assignment.
+   --  Free the statement created by Canon for a conditional assignment.
    procedure Free_Canon_Conditional_Statement (Stmt : Iir)
    is
       S : Iir;
@@ -5061,6 +5066,26 @@ package body Trans.Chap8 is
          S := Els;
       end loop;
    end Free_Canon_Conditional_Statement;
+
+   --  Free the statement created by Canon for a selected assignment.
+   procedure Free_Canon_Selected_Statement (Stmt : Iir)
+   is
+      S : Iir;
+      Choice : Iir;
+   begin
+      Choice := Get_Case_Statement_Alternative_Chain (Stmt);
+      while Choice /= Null_Iir loop
+         if not Get_Same_Alternative_Flag (Choice) then
+            S := Get_Associated_Chain (Choice);
+            Set_Associated_Chain (Choice, Null_Iir);
+            Set_Associated_Expr (Choice, Get_Expression (S));
+            Free_Iir (S);
+         end if;
+         Choice := Get_Chain (Choice);
+      end loop;
+      S := Stmt;
+      Free_Iir (S);
+   end Free_Canon_Selected_Statement;
 
    procedure Translate_Statement (Stmt : Iir) is
    begin
@@ -5106,6 +5131,17 @@ package body Trans.Chap8 is
                Trans.Update_Node_Infos;
                Translate_If_Statement (C_Stmt);
                Free_Canon_Conditional_Statement (C_Stmt);
+            end;
+         when Iir_Kind_Selected_Variable_Assignment_Statement =>
+            declare
+               use Vhdl.Canon;
+               C_Stmt : Iir;
+            begin
+               C_Stmt :=
+                 Canon_Selected_Variable_Assignment_Statement (Stmt);
+               Trans.Update_Node_Infos;
+               Translate_Case_Statement (C_Stmt);
+               Free_Canon_Selected_Statement (C_Stmt);
             end;
          when Iir_Kind_Conditional_Signal_Assignment_Statement =>
             declare

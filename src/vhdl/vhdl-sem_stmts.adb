@@ -13,9 +13,12 @@
 --
 --  You should have received a copy of the GNU General Public License
 --  along with this program.  If not, see <gnu.org/licenses>.
+
 with Errorout; use Errorout;
 with Types; use Types;
 with Flags; use Flags;
+with Std_Names;
+
 with Vhdl.Errors; use Vhdl.Errors;
 with Vhdl.Sem_Specs; use Vhdl.Sem_Specs;
 with Vhdl.Std_Package; use Vhdl.Std_Package;
@@ -27,10 +30,10 @@ with Vhdl.Sem_Scopes; use Vhdl.Sem_Scopes;
 with Vhdl.Sem_Types;
 with Vhdl.Sem_Inst;
 with Vhdl.Sem_Psl;
-with Std_Names;
 with Vhdl.Evaluation; use Vhdl.Evaluation;
 with Vhdl.Utils; use Vhdl.Utils;
 with Vhdl.Xrefs; use Vhdl.Xrefs;
+with Vhdl.Sensitivity_Checks;
 
 package body Vhdl.Sem_Stmts is
    -- Process is the scope, this is also the process for which drivers can
@@ -244,6 +247,15 @@ package body Vhdl.Sem_Stmts is
       Iir_Buffer_Mode => True,
       Iir_Linkage_Mode => False);
 
+   --  LRM19 16.2.8 Predefined attributes of named mode views
+   Iir_Mode_Writable_Converse : constant Boolean_Array_Of_Iir_Mode :=
+     (Iir_Unknown_Mode => False,
+      Iir_In_Mode => True,        --  IN -> OUT
+      Iir_Out_Mode => False,      --  OUT -> IN
+      Iir_Inout_Mode => True,     --  INOUT -> INOUT
+      Iir_Buffer_Mode => False,   --  BUFFER -> IN
+      Iir_Linkage_Mode => True);  --  Not allowed
+
    --  Return True iff signal interface INTER is readable.
    function Is_Interface_Signal_Readable (Inter : Iir) return Boolean
    is
@@ -317,7 +329,7 @@ package body Vhdl.Sem_Stmts is
    begin
       Target_Object := Name_To_Object (Target);
       if Target_Object = Null_Iir then
-         if Get_Kind (Target) = Iir_Kind_Simple_Name
+         if Get_Kind (Target) in Iir_Kinds_Denoting_Name
            and then Is_Error (Get_Named_Entity (Target))
          then
             --  Common case: target is not declared.  There was already
@@ -333,6 +345,127 @@ package body Vhdl.Sem_Stmts is
       return Target_Object;
    end Check_Simple_Signal_Target_Object;
 
+   --  Set MODE_IND to the last view declaration or a simple mode view element
+   --  for PFX.
+   --  MODE_IND can be NULL_IIR in case of error.
+   procedure Extract_View_Target_Prefix
+     (Name : Iir; Mode_Ind : out Iir; Reversed : out Boolean) is
+   begin
+      case Get_Kind (Name) is
+         when Iir_Kind_Interface_View_Declaration =>
+            --  Extract the mode view from a mode view indication
+            Extract_Mode_View_Name
+              (Get_Mode_View_Indication (Name), Mode_Ind, Reversed);
+         when Iir_Kinds_Denoting_Name =>
+            Extract_View_Target_Prefix
+              (Get_Named_Entity (Name), Mode_Ind, Reversed);
+         when Iir_Kind_Slice_Name
+           | Iir_Kind_Indexed_Name =>
+            Extract_View_Target_Prefix (Get_Prefix (Name), Mode_Ind, Reversed);
+            return;
+         when Iir_Kind_Selected_Element =>
+            Extract_View_Target_Prefix (Get_Prefix (Name), Mode_Ind, Reversed);
+            if Mode_Ind = Null_Iir then
+               return;
+            end if;
+            -- Extract the view element.
+            if Get_Kind (Mode_Ind) = Iir_Kind_Simple_Mode_View_Element then
+               return;
+            end if;
+            pragma Assert
+              (Get_Kind (Mode_Ind) = Iir_Kind_Mode_View_Declaration);
+
+            declare
+               El : constant Iir := Get_Named_Entity (Name);
+               Def_List : Iir_Flist;
+               Pos : Natural;
+            begin
+               Pos := Natural (Get_Element_Position (El));
+               Def_List := Get_Elements_Definition_List (Mode_Ind);
+               Mode_Ind := Get_Nth_Element (Def_List, Pos);
+            end;
+            case Get_Kind (Mode_Ind) is
+               when Iir_Kind_Simple_Mode_View_Element =>
+                  --  End of view.
+                  return;
+               when Iir_Kind_Record_Mode_View_Element
+                 | Iir_Kind_Array_Mode_View_Element =>
+                  --  Extract mode view declaration.
+                  declare
+                     Name : Iir;
+                  begin
+                     Name := Get_Mode_View_Name (Mode_Ind);
+                     if Get_Kind (Name) = Iir_Kind_Converse_Attribute then
+                        Name := Get_Prefix (Name);
+                        Reversed := not Reversed;
+                     end if;
+                     Mode_Ind := Get_Named_Entity (Name);
+                  end;
+               when others =>
+                  raise Internal_Error;
+            end case;
+         when others =>
+            Error_Kind ("extract_view_target_prefix", Name);
+      end case;
+   end Extract_View_Target_Prefix;
+
+   function Is_Mode_View_Writable (Mode_Ind : Iir; Reversed : Boolean)
+                                  return Boolean is
+   begin
+      case Get_Kind (Mode_Ind) is
+         when Iir_Kind_Simple_Mode_View_Element =>
+            if Reversed then
+               return Iir_Mode_Writable_Converse (Get_Mode (Mode_Ind));
+            else
+               return Iir_Mode_Writable (Get_Mode (Mode_Ind));
+            end if;
+         when Iir_Kind_Mode_View_Declaration =>
+            declare
+               Els : constant Iir := Get_Elements_Definition_Chain (Mode_Ind);
+               El : Iir;
+            begin
+               --  First, try the simple elements.
+               El := Els;
+               while El /= Null_Iir loop
+                  if Get_Kind (El) = Iir_Kind_Simple_Mode_View_Element
+                    and then not Is_Mode_View_Writable (El, Reversed)
+                  then
+                     return False;
+                  end if;
+                  El := Get_Chain (El);
+               end loop;
+               --  Then the non-simple one.
+               El := Els;
+               while El /= Null_Iir loop
+                  if Get_Kind (El) /= Iir_Kind_Simple_Mode_View_Element
+                    and then not Is_Mode_View_Writable (El, Reversed)
+                  then
+                     return False;
+                  end if;
+                  El := Get_Chain (El);
+               end loop;
+               --  No errors, so it is writable.
+               return True;
+            end;
+         when others =>
+            Error_Kind ("is_mode_view_writable", Mode_Ind);
+      end case;
+   end Is_Mode_View_Writable;
+
+   procedure Check_View_Signal_Target (Target : Iir)
+   is
+      Mode_Ind : Iir;
+      Reversed : Boolean;
+   begin
+      Extract_View_Target_Prefix (Target, Mode_Ind, Reversed);
+      if Mode_Ind = Null_Iir then
+         return;
+      end if;
+      if not Is_Mode_View_Writable (Mode_Ind, Reversed) then
+         Error_Msg_Sem (+Target, "mode view element can't be assigned");
+      end if;
+   end Check_View_Signal_Target;
+
    procedure Check_Simple_Signal_Target
      (Stmt : Iir; Target : Iir; Staticness : Iir_Staticness)
    is
@@ -340,11 +473,20 @@ package body Vhdl.Sem_Stmts is
       Target_Prefix : Iir;
       Guarded_Target : Tri_State_Type;
       Targ_Obj_Kind : Iir_Kind;
+      Add_Driver : Boolean;
    begin
       Target_Object := Check_Simple_Signal_Target_Object (Target);
       if Target_Object = Null_Iir then
          return;
       end if;
+
+      case Get_Kind (Stmt) is
+         when Iir_Kind_Signal_Force_Assignment_Statement
+           | Iir_Kind_Signal_Release_Assignment_Statement =>
+            Add_Driver := False;
+         when others =>
+            Add_Driver := True;
+      end case;
 
       Target_Prefix := Get_Object_Prefix (Target_Object);
       Targ_Obj_Kind := Get_Kind (Target_Prefix);
@@ -354,16 +496,24 @@ package body Vhdl.Sem_Stmts is
                Error_Msg_Sem
                  (+Target, "%n can't be assigned", +Target_Prefix);
             else
-               Sem_Add_Driver (Target_Object, Stmt);
+               if Add_Driver then
+                  Sem_Add_Driver (Target_Object, Stmt);
+               end if;
             end if;
          when Iir_Kind_Interface_View_Declaration =>
-            --  TODO: check prefix.
-            Sem_Add_Driver (Target_Object, Stmt);
+            Check_View_Signal_Target (Target);
+            if Add_Driver then
+               Sem_Add_Driver (Target_Object, Stmt);
+            end if;
          when Iir_Kind_Signal_Declaration =>
-            Sem_Add_Driver (Target_Object, Stmt);
+            if Add_Driver then
+               Sem_Add_Driver (Target_Object, Stmt);
+            end if;
             Set_Use_Flag (Target_Prefix, True);
          when Iir_Kind_External_Signal_Name =>
-            Sem_Add_Driver (Target_Object, Stmt);
+            if Add_Driver then
+               Sem_Add_Driver (Target_Object, Stmt);
+            end if;
          when Iir_Kind_Guard_Signal_Declaration =>
             Error_Msg_Sem (+Stmt, "implicit GUARD signal cannot be assigned");
             return;
@@ -473,7 +623,8 @@ package body Vhdl.Sem_Stmts is
       else
          case Get_Kind (Stmt) is
             when Iir_Kind_Variable_Assignment_Statement
-              | Iir_Kind_Conditional_Variable_Assignment_Statement =>
+              | Iir_Kind_Conditional_Variable_Assignment_Statement
+              | Iir_Kind_Selected_Variable_Assignment_Statement =>
                Check_Simple_Variable_Target (Stmt, Target, None);
             when others =>
                Check_Simple_Signal_Target (Stmt, Target, None);
@@ -696,10 +847,10 @@ package body Vhdl.Sem_Stmts is
       end loop;
    end Sem_Check_Waveform_Chain;
 
-   procedure Sem_Selected_Signal_Assignment_Expression (Stmt : Iir)
+   procedure Sem_Selected_Assignment_Expressions
+     (Stmt : Iir; Chain : in out Iir)
    is
       Expr: Iir;
-      Chain : Iir;
    begin
       --  LRM 9.5  Concurrent Signal Assignment Statements.
       --  The process statement equivalent to a concurrent signal assignment
@@ -712,15 +863,13 @@ package body Vhdl.Sem_Stmts is
       --  statement
 
       --  The choices.
-      Chain := Get_Selected_Waveform_Chain (Stmt);
       Expr := Sem_Case_Expression (Get_Expression (Stmt));
       if Expr /= Null_Iir then
          Check_Read (Expr);
          Set_Expression (Stmt, Expr);
          Sem_Case_Choices (Expr, Chain, Get_Location (Stmt));
-         Set_Selected_Waveform_Chain (Stmt, Chain);
       end if;
-   end Sem_Selected_Signal_Assignment_Expression;
+   end Sem_Selected_Assignment_Expressions;
 
    procedure Sem_Guard (Stmt: Iir)
    is
@@ -874,7 +1023,13 @@ package body Vhdl.Sem_Stmts is
          when Iir_Kind_Concurrent_Selected_Signal_Assignment
             | Iir_Kind_Selected_Waveform_Assignment_Statement =>
             --  The choices.
-            Sem_Selected_Signal_Assignment_Expression (Stmt);
+            declare
+               Chain : Iir;
+            begin
+               Chain := Get_Selected_Waveform_Chain (Stmt);
+               Sem_Selected_Assignment_Expressions (Stmt, Chain);
+               Set_Selected_Waveform_Chain (Stmt, Chain);
+            end;
          when others =>
             null;
       end case;
@@ -924,6 +1079,34 @@ package body Vhdl.Sem_Stmts is
       end loop;
    end Sem_Conditional_Expression_Chain;
 
+   procedure Sem_Selected_Expressions_Chain
+     (Sel_Expr : Iir; Atype : in out Iir; Constrained : Boolean)
+   is
+      El : Iir;
+      Expr : Iir;
+   begin
+      El := Sel_Expr;
+      while El /= Null_Iir loop
+         if not Get_Same_Alternative_Flag (El) then
+            Expr := Get_Associated_Expr (El);
+            Expr := Sem_Expression_Wildcard (Expr, Atype, Constrained);
+
+            if Expr /= Null_Iir then
+               Set_Associated_Expr (El, Expr);
+
+               if Is_Expr_Fully_Analyzed (Expr) then
+                  Check_Read (Expr);
+                  Expr := Eval_Expr_If_Static (Expr);
+               end if;
+
+               Merge_Wildcard_Type (Expr, Atype);
+            end if;
+         end if;
+
+         El := Get_Chain (El);
+      end loop;
+   end Sem_Selected_Expressions_Chain;
+
    procedure Sem_Signal_Force_Release_Assignment (Stmt: Iir)
    is
       Target        : Iir;
@@ -947,20 +1130,18 @@ package body Vhdl.Sem_Stmts is
       Target_Object := Null_Iir;
       Target_Prefix := Null_Iir;
       Target_Type := Wildcard_Any_Type;
-      if Target = Null_Iir then
-         --  To avoid spurious errors, assume the target is fully
-         --  constrained.
-         Constrained := True;
-      else
+      --  To avoid spurious errors, assume the target is fully constrained.
+      Constrained := True;
+      if Target /= Null_Iir then
          Set_Target (Stmt, Target);
          if Is_Expr_Fully_Analyzed (Target) then
             Check_Target (Stmt, Target);
             Target_Type := Get_Type (Target);
             Target_Object := Check_Simple_Signal_Target_Object (Target);
-            Target_Prefix := Get_Object_Prefix (Target_Object);
-            Constrained := Is_Object_Name_Fully_Constrained (Target);
-         else
-            Constrained := False;
+            if Target_Object /= Null_Iir then
+               Target_Prefix := Get_Object_Prefix (Target_Object);
+               Constrained := Is_Object_Name_Fully_Constrained (Target);
+            end if;
          end if;
       end if;
 
@@ -1124,8 +1305,11 @@ package body Vhdl.Sem_Stmts is
 
             when Iir_Kind_Conditional_Variable_Assignment_Statement =>
                Expr := Get_Conditional_Expression_Chain (Stmt);
-               Sem_Conditional_Expression_Chain
-                 (Expr, Stmt_Type, Constrained);
+               Sem_Conditional_Expression_Chain (Expr, Stmt_Type, Constrained);
+
+            when Iir_Kind_Selected_Variable_Assignment_Statement =>
+               Expr := Get_Selected_Expressions_Chain (Stmt);
+               Sem_Selected_Expressions_Chain (Expr, Stmt_Type, Constrained);
          end case;
 
          exit when Done;
@@ -1140,6 +1324,20 @@ package body Vhdl.Sem_Stmts is
             exit;
          end if;
       end loop;
+
+      case Get_Kind (Stmt) is
+         when Iir_Kind_Selected_Variable_Assignment_Statement =>
+            --  The choices.
+            declare
+               Chain : Iir;
+            begin
+               Chain := Get_Selected_Expressions_Chain (Stmt);
+               Sem_Selected_Assignment_Expressions (Stmt, Chain);
+               Set_Selected_Expressions_Chain (Stmt, Chain);
+            end;
+         when others =>
+            null;
+      end case;
    end Sem_Variable_Assignment;
 
    procedure Sem_Return_Statement (Stmt: Iir_Return_Statement) is
@@ -1895,7 +2093,8 @@ package body Vhdl.Sem_Stmts is
                Sem_Passive_Statement (Stmt);
                Sem_Signal_Force_Release_Assignment (Stmt);
             when Iir_Kind_Variable_Assignment_Statement
-               | Iir_Kind_Conditional_Variable_Assignment_Statement =>
+               | Iir_Kind_Conditional_Variable_Assignment_Statement
+               | Iir_Kind_Selected_Variable_Assignment_Statement =>
                Sem_Variable_Assignment (Stmt);
             when Iir_Kind_Return_Statement =>
                Sem_Return_Statement (Stmt);
@@ -2416,17 +2615,35 @@ package body Vhdl.Sem_Stmts is
       else
          if not Get_Suspend_Flag (Proc) and then not Get_Stop_Flag (Proc) then
             Warning_Msg_Sem
-              (Warnid_No_Wait, +Proc,
+              (Warnid_Missing_Wait, +Proc,
                "infinite loop for this process without a wait statement");
          end if;
       end if;
    end Sem_Process_Statement;
 
    procedure Sem_Sensitized_Process_Statement
-     (Proc: Iir_Sensitized_Process_Statement) is
+     (Proc: Iir_Sensitized_Process_Statement)
+   is
+      List : constant Iir_List := Get_Sensitivity_List (Proc);
+      Prev_Nbr_Errors : constant Natural := Errorout.Nbr_Errors;
    begin
-      Sem_Sensitivity_List (Get_Sensitivity_List (Proc));
+      Sem_Sensitivity_List (List);
       Sem_Process_Statement (Proc);
+
+      if Is_Warning_Enabled (Warnid_Sensitivity)
+        and then List /= Iir_List_All
+        and then Nbr_Errors = Prev_Nbr_Errors
+      then
+         --  Reports sensitivity warnings, but only if no errors in the
+         --  process (as canon don't deal with errors).
+         if Get_Nbr_Elements (List) > 256 then
+            Warning_Msg_Sem
+              (Warnid_Sensitivity, +Proc,
+               "sensitivity list is too long to be checked");
+         else
+            Vhdl.Sensitivity_Checks.Check_Sensitivity_List (Proc);
+         end if;
+      end if;
    end Sem_Sensitized_Process_Statement;
 
    procedure Sem_Concurrent_Break_Statement (Stmt : Iir)

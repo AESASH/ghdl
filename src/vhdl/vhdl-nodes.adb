@@ -1174,19 +1174,19 @@ package body Vhdl.Nodes is
            | Iir_Kind_Conditional_Signal_Assignment_Statement
            | Iir_Kind_Signal_Force_Assignment_Statement
            | Iir_Kind_Signal_Release_Assignment_Statement
+           | Iir_Kind_Variable_Assignment_Statement
+           | Iir_Kind_Conditional_Variable_Assignment_Statement
            | Iir_Kind_Null_Statement
            | Iir_Kind_Assertion_Statement
            | Iir_Kind_Report_Statement
-           | Iir_Kind_Variable_Assignment_Statement
-           | Iir_Kind_Conditional_Variable_Assignment_Statement
-           | Iir_Kind_Return_Statement
-           | Iir_Kind_For_Loop_Statement
-           | Iir_Kind_While_Loop_Statement
            | Iir_Kind_Next_Statement
            | Iir_Kind_Exit_Statement
-           | Iir_Kind_Case_Statement
+           | Iir_Kind_Return_Statement
            | Iir_Kind_Procedure_Call_Statement
            | Iir_Kind_Break_Statement
+           | Iir_Kind_For_Loop_Statement
+           | Iir_Kind_While_Loop_Statement
+           | Iir_Kind_Case_Statement
            | Iir_Kind_If_Statement
            | Iir_Kind_Suspend_State_Statement
            | Iir_Kind_Elsif
@@ -1310,6 +1310,7 @@ package body Vhdl.Nodes is
            | Iir_Kind_Component_Instantiation_Statement
            | Iir_Kind_Simple_Simultaneous_Statement
            | Iir_Kind_Selected_Waveform_Assignment_Statement
+           | Iir_Kind_Selected_Variable_Assignment_Statement
            | Iir_Kind_Wait_Statement
            | Iir_Kind_Signal_Slew_Attribute
            | Iir_Kind_Quantity_Slew_Attribute
@@ -4508,6 +4509,22 @@ package body Vhdl.Nodes is
       Set_Field1 (Decl, Chain);
    end Set_Elements_Definition_Chain;
 
+   function Get_Elements_Definition_List (Decl : Iir) return Iir_Flist is
+   begin
+      pragma Assert (Decl /= Null_Iir);
+      pragma Assert (Has_Elements_Definition_List (Get_Kind (Decl)),
+                     "no field Elements_Definition_List");
+      return Iir_To_Iir_Flist (Get_Field4 (Decl));
+   end Get_Elements_Definition_List;
+
+   procedure Set_Elements_Definition_List (Decl : Iir; List : Iir_Flist) is
+   begin
+      pragma Assert (Decl /= Null_Iir);
+      pragma Assert (Has_Elements_Definition_List (Get_Kind (Decl)),
+                     "no field Elements_Definition_List");
+      Set_Field4 (Decl, Iir_Flist_To_Iir (List));
+   end Set_Elements_Definition_List;
+
    function Get_Owned_Elements_Chain (Atype : Iir) return Iir is
    begin
       pragma Assert (Atype /= Null_Iir);
@@ -5502,6 +5519,22 @@ package body Vhdl.Nodes is
       Set_Field7 (Target, Chain);
    end Set_Selected_Waveform_Chain;
 
+   function Get_Selected_Expressions_Chain (Target : Iir) return Iir is
+   begin
+      pragma Assert (Target /= Null_Iir);
+      pragma Assert (Has_Selected_Expressions_Chain (Get_Kind (Target)),
+                     "no field Selected_Expressions_Chain");
+      return Get_Field7 (Target);
+   end Get_Selected_Expressions_Chain;
+
+   procedure Set_Selected_Expressions_Chain (Target : Iir; Chain : Iir) is
+   begin
+      pragma Assert (Target /= Null_Iir);
+      pragma Assert (Has_Selected_Expressions_Chain (Get_Kind (Target)),
+                     "no field Selected_Expressions_Chain");
+      Set_Field7 (Target, Chain);
+   end Set_Selected_Expressions_Chain;
+
    function Get_Conditional_Waveform_Chain (Target : Iir) return Iir is
    begin
       pragma Assert (Target /= Null_Iir);
@@ -6402,22 +6435,6 @@ package body Vhdl.Nodes is
                      "no field Attr_Chain");
       Set_Field2 (Attr, Chain);
    end Set_Attr_Chain;
-
-   function Get_Attribute_Implicit_Declaration (Attr : Iir) return Iir is
-   begin
-      pragma Assert (Attr /= Null_Iir);
-      pragma Assert (Has_Attribute_Implicit_Declaration (Get_Kind (Attr)),
-                     "no field Attribute_Implicit_Declaration");
-      return Get_Field3 (Attr);
-   end Get_Attribute_Implicit_Declaration;
-
-   procedure Set_Attribute_Implicit_Declaration (Attr : Iir; Decl : Iir) is
-   begin
-      pragma Assert (Attr /= Null_Iir);
-      pragma Assert (Has_Attribute_Implicit_Declaration (Get_Kind (Attr)),
-                     "no field Attribute_Implicit_Declaration");
-      Set_Field3 (Attr, Decl);
-   end Set_Attribute_Implicit_Declaration;
 
    function Get_Actual_Type (Target : Iir) return Iir is
    begin

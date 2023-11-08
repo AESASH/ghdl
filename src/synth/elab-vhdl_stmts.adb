@@ -129,8 +129,9 @@ package body Elab.Vhdl_Stmts is
             if Config = Null_Node then
                Config := Default;
             end if;
-            Apply_Block_Configuration (Config, Bod);
          end;
+
+         Apply_Block_Configuration (Config, Bod);
 
          --  Allocate the iterator value for the body.
          Current_Pool := Instance_Pool;
@@ -140,6 +141,8 @@ package body Elab.Vhdl_Stmts is
          Sub_Inst := Elab_Generate_Statement_Body
            (Gen_Inst, Bod, Config, Iterator, Val);
          Set_Generate_Sub_Instance (Gen_Inst, Positive (I), Sub_Inst);
+
+         Unapply_Block_Configuration (Config);
 
          --  Update index.
          case It_Rng.Drange.Dir is
@@ -185,6 +188,8 @@ package body Elab.Vhdl_Stmts is
             Apply_Block_Configuration (Config, Bod);
             Sub_Inst := Elab_Generate_Statement_Body (Syn_Inst, Bod, Config);
             Create_Sub_Instance (Syn_Inst, Bod, Sub_Inst);
+
+            Unapply_Block_Configuration (Config);
             return;
          end if;
          Gen := Get_Generate_Else_Clause (Gen);
@@ -214,8 +219,7 @@ package body Elab.Vhdl_Stmts is
       Val := Synth_Expression (Syn_Inst, Expr);
       Strip_Const (Val);
 
-      Gen := Synth.Vhdl_Stmts.Execute_Static_Choices_Scalar
-        (Syn_Inst, Choices, Read_Discrete (Val));
+      Gen := Synth.Vhdl_Stmts.Execute_Static_Choices (Syn_Inst, Choices, Val);
       Bod := Get_Associated_Block (Gen);
       Release_Expr_Pool (Marker);
 
@@ -224,18 +228,19 @@ package body Elab.Vhdl_Stmts is
       Apply_Block_Configuration (Config, Bod);
       Sub_Inst := Elab_Generate_Statement_Body (Syn_Inst, Bod, Config);
       Create_Sub_Instance (Syn_Inst, Bod, Sub_Inst);
+      Unapply_Block_Configuration (Config);
    end Elab_Case_Generate_Statement;
 
    procedure Elab_Block_Statement (Syn_Inst : Synth_Instance_Acc; Blk : Node)
    is
       Hdr : constant Node := Get_Block_Header (Blk);
       Guard : constant Node := Get_Guard_Decl (Blk);
+      Blk_Cfg : constant Node := Get_Block_Block_Configuration (Blk);
       Blk_Inst : Synth_Instance_Acc;
       Assoc : Node;
       Inter : Node;
    begin
-      Apply_Block_Configuration
-        (Get_Block_Block_Configuration (Blk), Blk);
+      Apply_Block_Configuration (Blk_Cfg, Blk);
 
       Blk_Inst := Make_Elab_Instance (Syn_Inst, Blk, Blk, Null_Iir);
       Create_Sub_Instance (Syn_Inst, Blk, Blk_Inst);
@@ -261,6 +266,8 @@ package body Elab.Vhdl_Stmts is
       Elab_Declarations (Blk_Inst, Get_Declaration_Chain (Blk));
       Elab_Concurrent_Statements
         (Blk_Inst, Get_Concurrent_Statement_Chain (Blk));
+
+      Unapply_Block_Configuration (Blk_Cfg);
    end Elab_Block_Statement;
 
    procedure Elab_Concurrent_Statement
@@ -276,6 +283,8 @@ package body Elab.Vhdl_Stmts is
            | Iir_Kind_Concurrent_Procedure_Call_Statement
            | Iir_Kind_Concurrent_Break_Statement
            | Iir_Kind_Simple_Simultaneous_Statement
+           | Iir_Kind_Simultaneous_If_Statement
+           | Iir_Kind_Simultaneous_Case_Statement
            | Iir_Kind_Psl_Default_Clock
            | Iir_Kind_Psl_Restrict_Directive
            | Iir_Kind_Psl_Assume_Directive

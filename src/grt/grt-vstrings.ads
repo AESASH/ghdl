@@ -28,7 +28,7 @@ package Grt.Vstrings is
    pragma Preelaborate;
    --  A Vstring (Variable string) is an object which contains an unbounded
    --  string.
-   type Vstring is limited private;
+   type Vstring (Threshold : Natural) is limited private;
 
    --  Deallocate all storage internally allocated.
    procedure Free (Vstr : in out Vstring);
@@ -58,41 +58,13 @@ package Grt.Vstrings is
    --  Get VSTR as a C String.  The NUL character must have been added.
    function Get_C_String (Vstr : Vstring) return Ghdl_C_String;
 
-   --  A Rstring is link a Vstring but characters can only be prepended.
-   type Rstring is limited private;
-
-   --  Deallocate storage associated with Rstr.
-   procedure Free (Rstr : in out Rstring);
-
-   --  Prepend characters or strings.
-   procedure Prepend (Rstr : in out Rstring; C : Character);
-   procedure Prepend (Rstr : in out Rstring; Str : String);
-   procedure Prepend (Rstr : in out Rstring; Str : Ghdl_C_String);
-
-   --  Get the length of RSTR.
-   function Length (Rstr : Rstring) return Natural;
-
-   --  Return the address of the first character of RSTR.
-   function Get_Address (Rstr : Rstring) return Address;
-
-   --  Copy RSTR to STR, and return length of the string to LEN.
-   procedure Copy (Rstr : Rstring; Str : in out String; Len : out Natural);
-
 private
-   type Vstring is record
+   type Vstring (Threshold : Natural) is limited record
       Str : Ghdl_C_String := null;
       Max : Natural := 0;
       Len : Natural := 0;
-   end record;
 
-   type Rstring is record
-      --  String whose bounds is (1 .. Max).
-      Str : Ghdl_C_String := null;
-
-      --  Last index in STR.
-      Max : Natural := 0;
-
-      --  Index of the first character.
-      First : Natural := 1;
+      --  The fixed buffer, used when strings len is less than threshold.
+      Fixed : String (1 .. Threshold);
    end record;
 end Grt.Vstrings;

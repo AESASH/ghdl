@@ -372,7 +372,6 @@ package body Elab.Vhdl_Context is
       Obj : Obj_Type renames Syn_Inst.Objects (Info.Slot);
    begin
       pragma Assert (Obj.Kind = Obj_Object);
-      pragma Assert (Obj.Obj.Typ = Vt.Typ);
 
       Obj.Obj := Vt;
    end Mutate_Object;
@@ -383,9 +382,9 @@ package body Elab.Vhdl_Context is
    is
       Info : constant Sim_Info_Acc := Get_Ann (Stmt);
    begin
-      Create_Object (Syn_Inst, Info.Inst_Slot, 1);
-      pragma Assert (Syn_Inst.Objects (Info.Inst_Slot).Kind = Obj_None);
-      Syn_Inst.Objects (Info.Inst_Slot) := (Kind => Obj_Instance,
+      Create_Object (Syn_Inst, Info.Slot, 1);
+      pragma Assert (Syn_Inst.Objects (Info.Slot).Kind = Obj_None);
+      Syn_Inst.Objects (Info.Slot) := (Kind => Obj_Instance,
                                             I_Inst => Sub_Inst);
    end Create_Sub_Instance;
 
@@ -409,8 +408,22 @@ package body Elab.Vhdl_Context is
    begin
       Create_Object (Syn_Inst, Info.Slot, 1);
       pragma Assert (Syn_Inst.Objects (Info.Slot).Kind = Obj_None);
-      Syn_Inst.Objects (Info.Slot) := (Kind => Obj_Subtype, T_Typ => Typ);
+      Syn_Inst.Objects (Info.Slot) := (Kind => Obj_Subtype,
+                                       T_Typ => Typ,
+                                       T_Def => Null_Node);
    end Create_Subtype_Object;
+
+   procedure Create_Interface_Type
+     (Syn_Inst : Synth_Instance_Acc; Decl : Node; Typ : Type_Acc; Def : Node)
+   is
+      Info : constant Sim_Info_Acc := Get_Ann (Decl);
+   begin
+      Create_Object (Syn_Inst, Info.Slot, 1);
+      pragma Assert (Syn_Inst.Objects (Info.Slot).Kind = Obj_None);
+      Syn_Inst.Objects (Info.Slot) := (Kind => Obj_Subtype,
+                                       T_Typ => Typ,
+                                       T_Def => Def);
+   end Create_Interface_Type;
 
    procedure Create_Package_Object (Syn_Inst : Synth_Instance_Acc;
                                     Decl : Node;
@@ -420,16 +433,22 @@ package body Elab.Vhdl_Context is
       Info : constant Sim_Info_Acc := Get_Ann (Decl);
    begin
       if Is_Global then
-         pragma Assert (Syn_Inst.Objects (Info.Pkg_Slot).Kind = Obj_None);
+         pragma Assert (Syn_Inst.Objects (Info.Slot).Kind = Obj_None);
          pragma Assert (Syn_Inst.Up_Block = null);
          null;
       else
          pragma Assert (Syn_Inst.Up_Block /= null);
-         Create_Object (Syn_Inst, Info.Pkg_Slot, 1);
+         Create_Object (Syn_Inst, Info.Slot, 1);
       end if;
-      Syn_Inst.Objects (Info.Pkg_Slot) := (Kind => Obj_Instance,
-                                           I_Inst => Inst);
+      Syn_Inst.Objects (Info.Slot) := (Kind => Obj_Instance,
+                                       I_Inst => Inst);
    end Create_Package_Object;
+
+   procedure Clear_Package_Object
+     (Syn_Inst : Synth_Instance_Acc; Decl : Node) is
+   begin
+      Create_Package_Object (Syn_Inst, Decl, null, True);
+   end Clear_Package_Object;
 
    procedure Create_Package_Interface (Syn_Inst : Synth_Instance_Acc;
                                        Decl     : Node;
@@ -438,19 +457,24 @@ package body Elab.Vhdl_Context is
       Info : constant Sim_Info_Acc := Get_Ann (Decl);
    begin
       pragma Assert (Syn_Inst.Up_Block /= null);
-      Create_Object (Syn_Inst, Info.Pkg_Slot, 1);
-      Syn_Inst.Objects (Info.Pkg_Slot) := (Kind => Obj_Instance,
-                                           I_Inst => Inst);
+      Create_Object (Syn_Inst, Info.Slot, 1);
+      Syn_Inst.Objects (Info.Slot) := (Kind => Obj_Instance,
+                                       I_Inst => Inst);
    end Create_Package_Interface;
 
    function Get_Package_Object
      (Syn_Inst : Synth_Instance_Acc; Info : Sim_Info_Acc)
      return Synth_Instance_Acc
    is
-      Parent : Synth_Instance_Acc;
+      Parent : constant Synth_Instance_Acc :=
+        Get_Instance_By_Scope (Syn_Inst, Info.Scope);
+      Obj : Obj_Type renames Parent.Objects (Info.Slot);
    begin
-      Parent := Get_Instance_By_Scope (Syn_Inst, Info.Pkg_Parent);
-      return Parent.Objects (Info.Pkg_Slot).I_Inst;
+      if Obj.Kind = Obj_None then
+         --  Not yet elaborated.
+         return null;
+      end if;
+      return Obj.I_Inst;
    end Get_Package_Object;
 
    function Get_Package_Object
@@ -481,7 +505,7 @@ package body Elab.Vhdl_Context is
    is
       Info : constant Sim_Info_Acc := Get_Ann (Stmt);
    begin
-      return Syn_Inst.Objects (Info.Inst_Slot).I_Inst;
+      return Syn_Inst.Objects (Info.Slot).I_Inst;
    end Get_Sub_Instance;
 
    procedure Set_Sub_Instance (Syn_Inst : Synth_Instance_Acc;
@@ -490,9 +514,18 @@ package body Elab.Vhdl_Context is
    is
       Info : constant Sim_Info_Acc := Get_Ann (Stmt);
    begin
-      pragma Assert (Syn_Inst.Objects (Info.Inst_Slot).I_Inst = null);
-      Syn_Inst.Objects (Info.Inst_Slot).I_Inst := Sub_Inst;
+      pragma Assert (Syn_Inst.Objects (Info.Slot).I_Inst = null);
+      Syn_Inst.Objects (Info.Slot).I_Inst := Sub_Inst;
    end Set_Sub_Instance;
+
+   function Is_Elaborated (Syn_Inst : Synth_Instance_Acc; N : Node)
+                          return Boolean
+   is
+      Info : constant Sim_Info_Acc := Get_Ann (N);
+   begin
+      --  Elab_Objects is the slot value of the last created object.
+      return Syn_Inst.Elab_Objects >= Info.Slot;
+   end Is_Elaborated;
 
    function Get_Component_Instance
      (Syn_Inst : Synth_Instance_Acc) return Synth_Instance_Acc
@@ -520,7 +553,7 @@ package body Elab.Vhdl_Context is
    is
       Slot : constant Object_Slot_Type := Info.Slot;
    begin
-      if Info.Obj_Scope /= D.Inst.Block_Scope then
+      if Info.Scope /= D.Inst.Block_Scope then
          --  Bad context.
          raise Internal_Error;
       end if;
@@ -605,7 +638,7 @@ package body Elab.Vhdl_Context is
                raise Internal_Error;
             end;
          when Kind_Package =>
-            if Scope.Pkg_Parent = null then
+            if Scope.Scope = null then
                --  This is a scope for an uninstantiated package.
                declare
                   Current : Synth_Instance_Acc;
@@ -649,10 +682,15 @@ package body Elab.Vhdl_Context is
                       return Valtyp
    is
       Info : constant Sim_Info_Acc := Get_Ann (Obj);
-      Obj_Inst : Synth_Instance_Acc;
+      Obj_Inst : constant Synth_Instance_Acc :=
+        Get_Instance_By_Scope (Syn_Inst, Info.Scope);
+      Iobj : Obj_Type renames Obj_Inst.Objects (Info.Slot);
    begin
-      Obj_Inst := Get_Instance_By_Scope (Syn_Inst, Info.Obj_Scope);
-      return Obj_Inst.Objects (Info.Slot).Obj;
+      if Iobj.Kind = Obj_None then
+         --  Not yet elaborated...
+         return No_Valtyp;
+      end if;
+      return Iobj.Obj;
    end Get_Value;
 
    function Get_Subtype_Object
@@ -661,9 +699,34 @@ package body Elab.Vhdl_Context is
       Info : constant Sim_Info_Acc := Get_Ann (Decl);
       Obj_Inst : Synth_Instance_Acc;
    begin
-      Obj_Inst := Get_Instance_By_Scope (Syn_Inst, Info.Obj_Scope);
-      return Obj_Inst.Objects (Info.Slot).T_Typ;
+      Obj_Inst := Get_Instance_By_Scope (Syn_Inst, Info.Scope);
+      if Obj_Inst = null then
+         --  Not yet elaborated...
+         return null;
+      end if;
+      declare
+         Iobj : Obj_Type renames Obj_Inst.Objects (Info.Slot);
+      begin
+         if Iobj.Kind = Obj_None then
+            --  Not yet elaborated
+            return null;
+         end if;
+         return Iobj.T_Typ;
+      end;
    end Get_Subtype_Object;
+
+   procedure Get_Interface_Type (Syn_Inst : Synth_Instance_Acc;
+                                 Decl : Node;
+                                 Typ : out Type_Acc;
+                                 Def : out Node)
+   is
+      Info : constant Sim_Info_Acc := Get_Ann (Decl);
+      Obj_Inst : Synth_Instance_Acc;
+   begin
+      Obj_Inst := Get_Instance_By_Scope (Syn_Inst, Info.Scope);
+      Typ := Obj_Inst.Objects (Info.Slot).T_Typ;
+      Def := Obj_Inst.Objects (Info.Slot).T_Def;
+   end Get_Interface_Type;
 
    procedure Set_Caller_Instance (Syn_Inst : Synth_Instance_Acc;
                                   Caller : Synth_Instance_Acc) is
@@ -694,7 +757,9 @@ package body Elab.Vhdl_Context is
 
          if Obj.Kind = Obj_Instance then
             Res := Obj.I_Inst;
-            return;
+            if Res /= null then
+               return;
+            end if;
          end if;
       end loop;
    end Iterate_Top_Level;

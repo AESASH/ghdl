@@ -254,6 +254,7 @@ package Vhdl.Nodes_Meta is
       Field_Has_Element_Constraint_Flag,
       Field_Elements_Declaration_List,
       Field_Elements_Definition_Chain,
+      Field_Elements_Definition_List,
       Field_Owned_Elements_Chain,
       Field_Designated_Type,
       Field_Designated_Subtype_Indication,
@@ -316,6 +317,7 @@ package Vhdl.Nodes_Meta is
       Field_Conditional_Expression_Chain,
       Field_Allocator_Designated_Type,
       Field_Selected_Waveform_Chain,
+      Field_Selected_Expressions_Chain,
       Field_Conditional_Waveform_Chain,
       Field_Guard_Expression,
       Field_Guard_Decl,
@@ -371,7 +373,6 @@ package Vhdl.Nodes_Meta is
       Field_Parameter_3,
       Field_Parameter_4,
       Field_Attr_Chain,
-      Field_Attribute_Implicit_Declaration,
       Field_Actual_Type,
       Field_Actual_Type_Definition,
       Field_Association_Chain,
@@ -862,6 +863,7 @@ package Vhdl.Nodes_Meta is
    function Has_Has_Element_Constraint_Flag (K : Iir_Kind) return Boolean;
    function Has_Elements_Declaration_List (K : Iir_Kind) return Boolean;
    function Has_Elements_Definition_Chain (K : Iir_Kind) return Boolean;
+   function Has_Elements_Definition_List (K : Iir_Kind) return Boolean;
    function Has_Owned_Elements_Chain (K : Iir_Kind) return Boolean;
    function Has_Designated_Type (K : Iir_Kind) return Boolean;
    function Has_Designated_Subtype_Indication (K : Iir_Kind)
@@ -926,6 +928,7 @@ package Vhdl.Nodes_Meta is
    function Has_Conditional_Expression_Chain (K : Iir_Kind) return Boolean;
    function Has_Allocator_Designated_Type (K : Iir_Kind) return Boolean;
    function Has_Selected_Waveform_Chain (K : Iir_Kind) return Boolean;
+   function Has_Selected_Expressions_Chain (K : Iir_Kind) return Boolean;
    function Has_Conditional_Waveform_Chain (K : Iir_Kind) return Boolean;
    function Has_Guard_Expression (K : Iir_Kind) return Boolean;
    function Has_Guard_Decl (K : Iir_Kind) return Boolean;
@@ -981,8 +984,6 @@ package Vhdl.Nodes_Meta is
    function Has_Parameter_3 (K : Iir_Kind) return Boolean;
    function Has_Parameter_4 (K : Iir_Kind) return Boolean;
    function Has_Attr_Chain (K : Iir_Kind) return Boolean;
-   function Has_Attribute_Implicit_Declaration (K : Iir_Kind)
-      return Boolean;
    function Has_Actual_Type (K : Iir_Kind) return Boolean;
    function Has_Actual_Type_Definition (K : Iir_Kind) return Boolean;
    function Has_Association_Chain (K : Iir_Kind) return Boolean;

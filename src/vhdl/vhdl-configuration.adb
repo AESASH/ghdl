@@ -55,9 +55,12 @@ package body Vhdl.Configuration is
          --    a direct entity instantiation
          --  * a configuration may be referenced by itself for a recursive
          --    instantiation
-         pragma Assert (Get_Configuration_Done_Flag (Unit)
-                          or else (Get_Kind (Get_Library_Unit (Unit))
-                                     = Iir_Kind_Configuration_Declaration));
+         if not Get_Configuration_Done_Flag (Unit)
+           and then (Get_Kind (Get_Library_Unit (Unit))
+                       /= Iir_Kind_Configuration_Declaration)
+         then
+            Error_Msg_Elab (Unit, "recursive dependency of design unit");
+         end if;
          return;
       end if;
       Set_Configuration_Mark_Flag (Unit, True);
@@ -240,7 +243,9 @@ package body Vhdl.Configuration is
            | Iir_Kind_Psl_Default_Clock
            | Iir_Kind_Psl_Declaration
            | Iir_Kind_Psl_Endpoint_Declaration
-           | Iir_Kind_Simple_Simultaneous_Statement =>
+           | Iir_Kind_Simple_Simultaneous_Statement
+           | Iir_Kind_Simultaneous_If_Statement
+           | Iir_Kind_Simultaneous_Case_Statement =>
             null;
          when others =>
             Error_Kind ("add_design_concurrent_stmts(2)", Stmt);
@@ -663,7 +668,10 @@ package body Vhdl.Configuration is
       case Get_Kind (Lib_Unit) is
          when Iir_Kind_Entity_Declaration =>
             --  Use WORK as location (should use a command line location ?)
-            Load_Design_Unit (Unit, Work_Library);
+            Load_Design_Unit (Unit, Command_Line_Location);
+            if Nbr_Errors /= 0 then
+               return Null_Iir;
+            end if;
             Lib_Unit := Get_Library_Unit (Unit);
             if Secondary_Id /= Null_Identifier then
                Unit := Find_Secondary_Unit (Unit, Secondary_Id);
@@ -686,7 +694,7 @@ package body Vhdl.Configuration is
                   Unit := Get_Design_Unit (Arch_Unit);
                end;
             end if;
-            Load_Design_Unit (Unit, Lib_Unit);
+            Load_Design_Unit (Unit, Command_Line_Location);
             if Nbr_Errors /= 0 then
                return Null_Iir;
             end if;

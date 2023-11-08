@@ -67,6 +67,8 @@ package Trans_Decls is
    Ghdl_Signal_Set_Disconnect : O_Dnode;
    Ghdl_Signal_Disconnect : O_Dnode;
 
+   Ghdl_Signal_Set_Mode : O_Dnode;
+
    Ghdl_Signal_Driving : O_Dnode;
 
    Ghdl_Signal_Direct_Assign : O_Dnode;
@@ -177,8 +179,10 @@ package Trans_Decls is
    --  Predefined subprograms.
    Ghdl_Memcpy : O_Dnode;
    Ghdl_Deallocate : O_Dnode;
+   Ghdl_Allocate : O_Dnode;
    Ghdl_Malloc : O_Dnode;
    Ghdl_Malloc0 : O_Dnode;
+   Ghdl_Free_Mem : O_Dnode;
    Ghdl_Real_Exp : O_Dnode;
    Ghdl_I32_Exp : O_Dnode;
    Ghdl_I64_Exp : O_Dnode;

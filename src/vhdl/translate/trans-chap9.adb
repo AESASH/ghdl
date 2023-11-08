@@ -312,7 +312,10 @@ package body Trans.Chap9 is
             Sig := Get_Object_Prefix (Sig);
             pragma Assert
               (Get_Kind (Sig) /= Iir_Kind_Object_Alias_Declaration);
-            if not Get_After_Drivers_Flag (Sig) then
+            --  No direct drivers for external names.
+            if not Get_After_Drivers_Flag (Sig)
+              and then Get_Kind (Sig) /= Iir_Kind_External_Signal_Name
+            then
                Info.Process_Drivers (I).Var :=
                  Create_Var (Create_Var_Identifier (Sig, "_DDRV", I),
                              Chap4.Get_Object_Type
@@ -1916,7 +1919,7 @@ package body Trans.Chap9 is
                Open_Temp;
                Chap9.Destroy_Types (Sig);
                if Info.Process_Drivers (I).Var /= Null_Var then
-                  --  Elaborate direct driver.  Done only once.
+                  --  Elaborate direct driver.  Done only once per signal.
                   Chap4.Elab_Direct_Driver_Declaration_Storage (Base);
 
                   --  Initial value.
@@ -1939,6 +1942,7 @@ package body Trans.Chap9 is
                         Base_Type);
                   end if;
                end if;
+
                if Chap4.Has_Direct_Driver (Base) then
                   --  Signal has a direct driver.
                   Chap6.Translate_Direct_Driver (Sig, Sig_Node, Drv_Node);

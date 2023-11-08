@@ -22,6 +22,7 @@ with Files_Map;
 with Libraries;
 with Std_Names;
 with Errorout;
+with Debuggers; use Debuggers;
 
 with Elab.Debugger; use Elab.Debugger;
 with Elab.Memtype; use Elab.Memtype;
@@ -357,19 +358,30 @@ package body Elab.Vhdl_Debug is
       end case;
    end Disp_Type;
 
+   procedure Disp_Declaration_Type
+     (Instance : Synth_Instance_Acc; Decl : Node; Def : Node; Indent : Natural)
+   is
+      Typ : constant Type_Acc := Get_Subtype_Object (Instance, Def);
+   begin
+      Put_Indent (Indent);
+      Put (Vhdl.Errors.Disp_Node (Decl));
+      Put (": ");
+      Debug_Typ (Typ);
+   end Disp_Declaration_Type;
+
    procedure Disp_Declaration_Object
      (Instance : Synth_Instance_Acc; Decl : Iir; Indent : Natural) is
    begin
       case Get_Kind (Decl) is
          when Iir_Kind_Constant_Declaration
-           | Iir_Kind_Variable_Declaration
-           | Iir_Kind_Interface_Variable_Declaration
-           | Iir_Kind_Interface_Constant_Declaration
-           | Iir_Kind_Interface_File_Declaration
-           | Iir_Kind_Object_Alias_Declaration
-           | Iir_Kind_Interface_Signal_Declaration
-           | Iir_Kind_Signal_Declaration
-           | Iir_Kind_File_Declaration =>
+            | Iir_Kind_Variable_Declaration
+            | Iir_Kind_Interface_Variable_Declaration
+            | Iir_Kind_Interface_Constant_Declaration
+            | Iir_Kind_Interface_File_Declaration
+            | Iir_Kind_Object_Alias_Declaration
+            | Iir_Kind_Interface_Signal_Declaration
+            | Iir_Kind_Signal_Declaration
+            | Iir_Kind_File_Declaration =>
             declare
                Val : constant Valtyp := Get_Value (Instance, Decl);
                Dtype : constant Node := Get_Type (Decl);
@@ -383,23 +395,38 @@ package body Elab.Vhdl_Debug is
                New_Line;
             end;
          when Iir_Kinds_Signal_Attribute
-           | Iir_Kind_Attribute_Declaration
-           | Iir_Kind_Attribute_Specification =>
+            | Iir_Kind_Attribute_Declaration
+            | Iir_Kind_Attribute_Specification =>
             --  FIXME: todo ?
             null;
-         when Iir_Kind_Type_Declaration
-           | Iir_Kind_Anonymous_Type_Declaration
-           | Iir_Kind_Subtype_Declaration =>
-            --  FIXME: disp ranges
+         when Iir_Kind_Non_Object_Alias_Declaration =>
+            null;
+         when Iir_Kind_Type_Declaration =>
+            declare
+               Def : constant Node := Get_Type_Definition (Decl);
+            begin
+               case Get_Kind (Def) is
+                  when Iir_Kind_Record_Type_Definition
+                     | Iir_Kind_Array_Type_Definition =>
+                     Disp_Declaration_Type (Instance, Decl, Def, Indent);
+                  when others =>
+                     null;
+               end case;
+            end;
+         when Iir_Kind_Subtype_Declaration =>
+            null;
+         when Iir_Kind_Anonymous_Type_Declaration =>
             null;
          when Iir_Kind_Function_Declaration
-           | Iir_Kind_Function_Body
-           | Iir_Kind_Procedure_Declaration
-           | Iir_Kind_Procedure_Body
-           | Iir_Kind_Component_Declaration =>
+            | Iir_Kind_Function_Body
+            | Iir_Kind_Procedure_Declaration
+            | Iir_Kind_Procedure_Body
+            | Iir_Kind_Component_Declaration
+            | Iir_Kind_Protected_Type_Body =>
             null;
          when Iir_Kind_Package_Declaration
-           | Iir_Kind_Package_Body =>
+           | Iir_Kind_Package_Body
+           | Iir_Kind_Package_Instantiation_Declaration =>
             declare
                Sub_Inst : constant Synth_Instance_Acc :=
                  Get_Package_Object (Instance, Decl);
@@ -436,6 +463,19 @@ package body Elab.Vhdl_Debug is
          El := Get_Chain (El);
       end loop;
    end Disp_Declaration_Objects;
+
+   procedure Disp_Top_Package (Syn_Inst : Synth_Instance_Acc;
+                              With_Objs : Boolean)
+   is
+      Decl : constant Node := Get_Source_Scope (Syn_Inst);
+   begin
+      Put (Vhdl.Errors.Disp_Node (Decl));
+      Put (":");
+      New_Line;
+      if With_Objs then
+         Disp_Declaration_Objects (Syn_Inst, Get_Declaration_Chain (Decl), 0);
+      end if;
+   end Disp_Top_Package;
 
    package Hierarchy_Pkg is
       type Config_Type is record
@@ -555,6 +595,14 @@ package body Elab.Vhdl_Debug is
                      end loop;
                   end if;
                end;
+            when Iir_Kind_Case_Generate_Statement =>
+               Put_Indent (Cfg.Indent);
+               Put (Image (Get_Label (Stmt)));
+               Put_Line (": case-generate");
+               if Cfg.Recurse then
+                  Disp_Hierarchy (Get_Sub_Instance (Inst, Stmt),
+                                  Inc_Indent (Cfg));
+               end if;
             when Iir_Kind_Block_Statement =>
                declare
                   Sub : constant Synth_Instance_Acc :=
@@ -658,8 +706,10 @@ package body Elab.Vhdl_Debug is
                Put ("generate statement body");
                --  TODO: disp label or index ?
                New_Line;
-               Disp_Declaration_Objects
-                 (Inst, Get_Declaration_Chain (N), Cfg.Indent + 1);
+               if Cfg.With_Objs then
+                  Disp_Declaration_Objects
+                    (Inst, Get_Declaration_Chain (N), Cfg.Indent + 1);
+               end if;
                Disp_Hierarchy_Statements
                  (Inst, Get_Concurrent_Statement_Chain (N), Cfg);
             when Iir_Kind_Block_Statement =>
@@ -751,6 +801,28 @@ package body Elab.Vhdl_Debug is
       begin
          Decl := Chain;
          while Decl /= Null_Iir loop
+            case Get_Kind (Decl) is
+               when Iir_Kind_Protected_Type_Body =>
+                  if (Walk_Decl_Chain (Get_Declaration_Chain (Decl))
+                        = Walk_Abort)
+                  then
+                     return Walk_Abort;
+                  end if;
+               when Iir_Kind_Type_Declaration =>
+                  declare
+                     Def : constant Node := Get_Type_Definition (Decl);
+                  begin
+                     if Get_Kind (Def) = Iir_Kind_Protected_Type_Declaration
+                       and then (Walk_Decl_Chain (Get_Declaration_Chain (Def))
+                                   = Walk_Abort)
+                     then
+                        return Walk_Abort;
+                     end if;
+                  end;
+               when others =>
+                  null;
+            end case;
+
             case Walk_Declarations_Cb.all (Decl) is
                when Walk_Abort =>
                   return Walk_Abort;
@@ -812,8 +884,30 @@ package body Elab.Vhdl_Debug is
                         Stmt1 := Get_Generate_Else_Clause (Stmt1);
                      end loop;
                   end;
+               when Iir_Kind_Case_Generate_Statement =>
+                  declare
+                     Choice : Iir;
+                  begin
+                     Choice := Get_Case_Statement_Alternative_Chain (Stmt);
+                     while Choice /= Null_Iir loop
+                        if not Get_Same_Alternative_Flag (Choice) then
+                           if Walk_Generate_Statement_Body
+                             (Get_Associated_Block (Choice)) = Walk_Abort
+                           then
+                              return Walk_Abort;
+                           end if;
+                        end if;
+                        Choice := Get_Chain (Choice);
+                     end loop;
+                  end;
                when Iir_Kind_Component_Instantiation_Statement
-                 | Iir_Kind_Concurrent_Simple_Signal_Assignment =>
+                 | Iir_Kind_Concurrent_Simple_Signal_Assignment
+                 | Iir_Kind_Concurrent_Conditional_Signal_Assignment
+                 | Iir_Kind_Concurrent_Selected_Signal_Assignment
+                 | Iir_Kind_Concurrent_Procedure_Call_Statement
+                 | Iir_Kind_Concurrent_Assertion_Statement
+                 | Iir_Kind_Psl_Assert_Directive
+                 | Iir_Kind_Psl_Assume_Directive =>
                   null;
                when Iir_Kind_Block_Statement =>
                   --  FIXME: header
@@ -858,6 +952,8 @@ package body Elab.Vhdl_Debug is
             then
                return Walk_Abort;
             end if;
+         when Iir_Kind_Package_Instantiation_Declaration =>
+            null;
          when Iir_Kind_Configuration_Declaration =>
             if Walk_Decl_Chain (Get_Declaration_Chain (Unit)) = Walk_Abort
             then
@@ -1026,6 +1122,7 @@ package body Elab.Vhdl_Debug is
             when Iir_Kind_Component_Instantiation_Statement
               | Iir_Kind_If_Generate_Statement
               | Iir_Kind_For_Generate_Statement
+              | Iir_Kind_Case_Generate_Statement
               | Iir_Kind_Block_Statement =>
                declare
                   Sub : constant Synth_Instance_Acc :=
@@ -1120,6 +1217,8 @@ package body Elab.Vhdl_Debug is
       Scope := Get_Source_Scope (Inst);
       if Get_Kind (Scope) in Iir_Kinds_Process_Statement then
          --  The name to display is the name of the process.
+         Stmt := Scope;
+      elsif Get_Kind (Scope) = Iir_Kind_Package_Instantiation_Declaration then
          Stmt := Scope;
       elsif Get_Kind (Parent_Scope) = Iir_Kind_Component_Declaration then
          --  Display the name of then entity.
@@ -1289,7 +1388,11 @@ package body Elab.Vhdl_Debug is
    procedure Enter_Scope (Node : Iir)
    is
       use Vhdl.Sem_Scopes;
+      use Errorout;
    begin
+      --  Disable -Whide.
+      Enable_Warning (Warnid_Hide, False);
+
       Push_Interpretations;
       Open_Declarative_Region;
 
@@ -1354,7 +1457,7 @@ package body Elab.Vhdl_Debug is
       Cur_Inst : Synth_Instance_Acc;
       Cur_Scope : Node;
    begin
-      --  Decode options: /v
+      --  Decode options: /t /n
       P := Line'First;
       loop
          P := Skip_Blanks (Line (P .. Line'Last));
@@ -1387,7 +1490,7 @@ package body Elab.Vhdl_Debug is
          return;
       end if;
 
-      Get_Debug_Loc (Cur_Inst, Cur_Scope);
+      Get_Debug_Frame (Cur_Inst, Cur_Scope);
       if Cur_Scope = Null_Node
         or else Get_Kind (Cur_Scope) not in Iir_Kinds_Sequential_Statement
       then

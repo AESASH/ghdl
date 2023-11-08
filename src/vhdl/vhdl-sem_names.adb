@@ -198,6 +198,17 @@ package body Vhdl.Sem_Names is
       end if;
    end Add_Result;
 
+   --  Get the base name of NAME.
+   function Compute_Base_Name (Name : Iir) return Iir is
+   begin
+      case Get_Kind (Name) is
+         when Iir_Kinds_External_Name =>
+            return Name;
+         when others =>
+            return Get_Base_Name (Name);
+      end case;
+   end Compute_Base_Name;
+
    --  Extract from overload list RES the function call without implicit
    --  conversion.  Return Null_Iir if there is no function call, or if there
    --  is an expressions that isn't a function call, or if there is more than
@@ -416,6 +427,7 @@ package body Vhdl.Sem_Names is
          when Iir_Kind_Package_Instantiation_Declaration
            | Iir_Kind_Interface_Package_Declaration =>
             --  Generics are not visible in selected name.
+            --  They are indeed not included in LRM08 12.3 f)
             null;
             --  Iterator_Decl_Chain (Get_Generic_Chain (Decl), Id);
          when Iir_Kind_Block_Statement =>
@@ -563,22 +575,25 @@ package body Vhdl.Sem_Names is
          Obj_Alias := Obj;
       end if;
 
-      if Kind_In (Obj_Alias, Iir_Kind_Variable_Declaration,
-                  Iir_Kind_Interface_Variable_Declaration)
-      then
-         Obj_Type := Get_Type (Obj_Alias);
-         if Obj_Type = Null_Iir then
-            return;
-         end if;
-         if Get_Kind (Obj_Type) /= Iir_Kind_Protected_Type_Declaration
-         then
-            Error_Msg_Sem
-              (+Prefix, "type of the prefix should be a protected type");
-            return;
-         end if;
-         Set_Method_Object (Call, Obj_Alias);
-         Set_Use_Flag (Obj, True);
-      end if;
+      case Get_Kind (Obj_Alias) is
+         when Iir_Kind_Variable_Declaration
+           | Iir_Kind_Interface_Variable_Declaration
+           | Iir_Kind_External_Variable_Name =>
+            Obj_Type := Get_Type (Obj_Alias);
+            if Obj_Type = Null_Iir then
+               return;
+            end if;
+            if Get_Kind (Obj_Type) /= Iir_Kind_Protected_Type_Declaration
+            then
+               Error_Msg_Sem
+                 (+Prefix, "type of the prefix should be a protected type");
+               return;
+            end if;
+            Set_Method_Object (Call, Obj);
+            Set_Use_Flag (Obj, True);
+         when others =>
+            null;
+      end case;
    end Name_To_Method_Object;
 
    --  NAME is the name of the function (and not the parenthesis name)
@@ -697,7 +712,7 @@ package body Vhdl.Sem_Names is
       Set_Expr_Staticness
         (Expr, Min (Expr_Staticness, Get_Expr_Staticness (Prefix)));
 
-      Set_Base_Name (Expr, Get_Base_Name (Prefix));
+      Set_Base_Name (Expr, Compute_Base_Name (Prefix));
    end Finish_Sem_Indexed_Name;
 
    procedure Finish_Sem_Dereference (Res : Iir) is
@@ -724,7 +739,7 @@ package body Vhdl.Sem_Names is
       Prefix_Rng : Iir;
       Suffix_Rng : Iir;
    begin
-      Set_Base_Name (Name, Get_Base_Name (Prefix));
+      Set_Base_Name (Name, Compute_Base_Name (Prefix));
 
       --  LRM93 6.5: the prefix of an indexed name must be appropriate
       --  for an array type.
@@ -1006,7 +1021,6 @@ package body Vhdl.Sem_Names is
             when Iir_Kind_Entity_Declaration
               | Iir_Kind_Architecture_Body
               | Iir_Kind_Block_Statement
-              | Iir_Kind_Block_Header
               | Iir_Kind_Component_Declaration
               | Iir_Kinds_Process_Statement
               | Iir_Kind_Generate_Statement_Body
@@ -1729,7 +1743,9 @@ package body Vhdl.Sem_Names is
             if not Get_Is_Within_Flag (Get_Parent (Decl)) then
                return;
             end if;
-         when Iir_Kind_File_Declaration =>
+         when Iir_Kind_File_Declaration
+            | Iir_Kind_External_Signal_Name
+            | Iir_Kind_External_Variable_Name =>
             --  LRM 93 2.2
             --  If a pure function is the parent of a given procedure, then
             --  that procedure must not contain a reference to an explicitly
@@ -1737,6 +1753,9 @@ package body Vhdl.Sem_Names is
             --
             --  A pure function must not contain a reference to an explicitly
             --  declared file.
+
+            --  GHDL: likewise for external names: they cannot appear in
+            --   pure functions.
             if Get_Kind (Subprg) = Iir_Kind_Function_Declaration then
                Error_Pure (Subprg, Obj);
             else
@@ -2110,7 +2129,7 @@ package body Vhdl.Sem_Names is
             Xref_Ref (Res, Get_Named_Entity (Res));
             Set_Name_Staticness (Res, Get_Name_Staticness (Prefix));
             Set_Expr_Staticness (Res, Get_Expr_Staticness (Prefix));
-            Set_Base_Name (Res, Get_Base_Name (Prefix));
+            Set_Base_Name (Res, Compute_Base_Name (Prefix));
             Free_Iir (Name);
          when Iir_Kind_Dereference =>
             pragma Assert (Get_Kind (Name) = Iir_Kind_Selected_By_All_Name);
@@ -2351,6 +2370,10 @@ package body Vhdl.Sem_Names is
          Base_Type := Get_Base_Type (Prefix_Type);
          if Get_Kind (Base_Type) = Iir_Kind_Access_Type_Definition then
             Base_Type := Get_Base_Type (Get_Designated_Type (Base_Type));
+         end if;
+         if Is_Error (Base_Type) then
+            --  Avoid error storm.
+            return;
          end if;
          if Get_Kind (Base_Type) /= Iir_Kind_Record_Type_Definition then
             Error_Msg_Sem
@@ -2606,6 +2629,7 @@ package body Vhdl.Sem_Names is
          when Iir_Kinds_Object_Declaration
            | Iir_Kind_Indexed_Name
            | Iir_Kind_Selected_Element
+           | Iir_Kinds_External_Name
            | Iir_Kind_Dereference
            | Iir_Kind_Implicit_Dereference
            | Iir_Kind_Attribute_Value
@@ -2634,7 +2658,9 @@ package body Vhdl.Sem_Names is
            | Iir_Kind_Element_Attribute
            | Iir_Kind_Enumeration_Literal
            | Iir_Kind_Unit_Declaration
-           | Iir_Kind_Variable_Assignment_Statement =>
+           | Iir_Kind_Variable_Assignment_Statement
+           | Iir_Kind_Component_Declaration
+           | Iir_Kind_Mode_View_Declaration =>
             if not Soft then
                Error_Msg_Sem
                  (+Prefix_Loc, "%n cannot be selected by name", +Prefix);
@@ -3956,7 +3982,7 @@ package body Vhdl.Sem_Names is
       Set_Prefix (Res, Prefix);
       Set_Type (Res, Attr_Type);
 
-      Set_Base_Name (Res, Get_Base_Name (Prefix_Name));
+      Set_Base_Name (Res, Compute_Base_Name (Prefix_Name));
       Set_Name_Staticness (Res, Get_Name_Staticness (Prefix_Name));
       Set_Type_Staticness (Res, Get_Type_Staticness (Attr_Type));
 
@@ -3989,7 +4015,7 @@ package body Vhdl.Sem_Names is
       Set_Prefix (Res, Prefix);
       Set_Nature (Res, Get_Nature (Prefix));
 
-      Set_Base_Name (Res, Get_Base_Name (Prefix_Name));
+      Set_Base_Name (Res, Compute_Base_Name (Prefix_Name));
       Set_Name_Staticness (Res, Get_Name_Staticness (Prefix_Name));
 
       return Res;
@@ -4642,7 +4668,7 @@ package body Vhdl.Sem_Names is
          when Iir_Kind_Attribute_Name =>
             Sem_Attribute_Name (Name);
          when Iir_Kinds_External_Name =>
-            Sem_External_Name (Name);
+            Sem_External_Name (Name, False);
          when Iir_Kind_Signature =>
             Error_Msg_Sem (+Name, "signature cannot be used here");
             Set_Named_Entity (Name, Create_Error_Name (Name));
@@ -5147,9 +5173,11 @@ package body Vhdl.Sem_Names is
       end case;
    end Sem_Denoting_Name;
 
-   procedure Sem_External_Name (Name : Iir)
+   procedure Sem_External_Name (Name : Iir; In_Alias : Boolean)
    is
       Atype : Iir;
+      Path : Iir;
+      Expr : Iir;
    begin
       pragma Assert (Get_Type (Name) = Null_Iir);
 
@@ -5174,6 +5202,7 @@ package body Vhdl.Sem_Names is
 
       case Iir_Kinds_External_Name (Get_Kind (Name)) is
          when Iir_Kind_External_Signal_Name =>
+            Sem_Types.Set_Type_Has_Signal (Atype);
             --  By default.
             Set_Has_Active_Flag (Name, True);
          when others =>
@@ -5182,6 +5211,28 @@ package body Vhdl.Sem_Names is
 
       --  Consider the node as analyzed.
       Set_Named_Entity (Name, Name);
+
+      Path := Get_External_Pathname (Name);
+      while Path /= Null_Iir loop
+         if Get_Kind (Path) = Iir_Kind_Pathname_Element then
+            --  LRM08 8.7 External names
+            --  The type of the expression shall be determined by applying the
+            --  rules of 12.5 to the expression considered as a complete
+            --  context, using the rule that the type shall be discrete.
+            Expr := Get_Pathname_Expression (Path);
+            if Expr /= Null_Iir then
+               Expr := Sem_Expression_Wildcard
+                 (Expr, Wildcard_Any_Discrete_Type);
+            end if;
+         end if;
+         Path := Get_Pathname_Suffix (Path);
+      end loop;
+
+      if not In_Alias then
+         --  Add an implicit declaration if the external name is not the name
+         --  in an alias.
+         Add_Implicit_Declaration (Name);
+      end if;
    end Sem_External_Name;
 
    function Sem_Terminal_Name (Name : Iir) return Iir

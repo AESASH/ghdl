@@ -1324,6 +1324,9 @@ package body Vhdl.Parse is
             else
                Set_Identifier (Res, Current_Identifier);
 
+               --  The location should be on the identifier.
+               Set_Location (Res);
+
                --  Skip identifier.
                Scan;
             end if;
@@ -1406,6 +1409,11 @@ package body Vhdl.Parse is
 
             --  Skip ')'.
             Expect_Scan (Tok_Right_Paren);
+
+            if Current_Token /= Tok_Dot then
+               Error_Msg_Parse ("pathname must finish with a name");
+               exit;
+            end if;
          end if;
 
          exit when Current_Token /= Tok_Dot;
@@ -2797,7 +2805,7 @@ package body Vhdl.Parse is
    --
    --  [ LRM93 1.1.1.2 ]
    --  port_list ::= PORT_interface_list
-   procedure Parse_Port_Clause (Parent : Iir)
+   function Parse_Port_Clause (Parent : Iir) return Iir
    is
       Res: Iir;
    begin
@@ -2808,7 +2816,7 @@ package body Vhdl.Parse is
       Res := Parse_Interface_List (Port_Interface_List, Parent);
 
       Scan_Semi_Colon ("port clause");
-      Set_Port_Chain (Parent, Res);
+      return Res;
    end Parse_Port_Clause;
 
    --  precond : GENERIC
@@ -2876,7 +2884,7 @@ package body Vhdl.Parse is
             end if;
 
             Has_Port := True;
-            Parse_Port_Clause (Parent);
+            Set_Port_Chain (Parent, Parse_Port_Clause (Parent));
          else
             exit;
          end if;
@@ -6995,6 +7003,12 @@ package body Vhdl.Parse is
               ("'-' and '+' are not allowed in primary, use parenthesis");
             return Parse_Expression (Prio_Simple);
 
+         when Tok_Abs
+           | Tok_Not =>
+            Error_Msg_Parse
+              ("'abs' and 'not' are not allowed in primary, use parenthesis");
+            return Parse_Expression (Prio_Simple);
+
          when Tok_Comma
            | Tok_Semi_Colon
            | Tok_Right_Paren
@@ -7041,10 +7055,14 @@ package body Vhdl.Parse is
    --    | abs primary
    --    | not primary
    --    | logical_operator primary
-   function Build_Unary_Factor (Op : Iir_Kind) return Iir
+   function Build_Unary_Factor (Op : Iir_Kind; Prio : Prio_Type) return Iir
    is
       Res : Iir;
    begin
+      if Prio > Prio_Factor then
+         Error_Msg_Parse ("'-'/'+' can only appear before the first term");
+      end if;
+
       Res := Create_Iir (Op);
       Set_Location (Res);
 
@@ -7056,10 +7074,14 @@ package body Vhdl.Parse is
       return Res;
    end Build_Unary_Factor;
 
-   function Build_Unary_Simple (Op : Iir_Kind) return Iir
+   function Build_Unary_Simple (Op : Iir_Kind; Prio : Prio_Type) return Iir
    is
       Res : Iir;
    begin
+      if Prio > Prio_Simple then
+         Error_Msg_Parse ("'-'/'+' can only appear before the first term");
+      end if;
+
       Res := Create_Iir (Op);
       Set_Location (Res);
 
@@ -7071,7 +7093,8 @@ package body Vhdl.Parse is
       return Res;
    end Build_Unary_Simple;
 
-   function Build_Unary_Factor_08 (Op : Iir_Kind) return Iir is
+   function Build_Unary_Factor_08 (Op : Iir_Kind; Prio : Prio_Type)
+                                  return Iir is
    begin
       if Flags.Vhdl_Std < Vhdl_08 then
          Error_Msg_Parse ("missing left operand of logical expression");
@@ -7081,57 +7104,49 @@ package body Vhdl.Parse is
 
          return Parse_Primary;
       else
-         return Build_Unary_Factor (Op);
+         return Build_Unary_Factor (Op, Prio);
       end if;
    end Build_Unary_Factor_08;
 
-   function Parse_Unary_Expression return Iir
-   is
-      Res, Left : Iir_Expression;
+   --  Parse a factor.
+   function Parse_Unary_Expression (Prio : Prio_Type) return Iir is
    begin
       case Current_Token is
          when Tok_Plus =>
-            return Build_Unary_Simple (Iir_Kind_Identity_Operator);
+            return Build_Unary_Simple (Iir_Kind_Identity_Operator, Prio);
          when Tok_Minus =>
-            return Build_Unary_Simple (Iir_Kind_Negation_Operator);
+            return Build_Unary_Simple (Iir_Kind_Negation_Operator, Prio);
 
          when Tok_Abs =>
-            return Build_Unary_Factor (Iir_Kind_Absolute_Operator);
+            return Build_Unary_Factor (Iir_Kind_Absolute_Operator, Prio);
          when Tok_Not =>
-            return Build_Unary_Factor (Iir_Kind_Not_Operator);
+            return Build_Unary_Factor (Iir_Kind_Not_Operator, Prio);
 
          when Tok_And =>
-            return Build_Unary_Factor_08 (Iir_Kind_Reduction_And_Operator);
+            return Build_Unary_Factor_08
+              (Iir_Kind_Reduction_And_Operator, Prio);
          when Tok_Or =>
-            return Build_Unary_Factor_08 (Iir_Kind_Reduction_Or_Operator);
+            return Build_Unary_Factor_08
+              (Iir_Kind_Reduction_Or_Operator, Prio);
          when Tok_Nand =>
-            return Build_Unary_Factor_08 (Iir_Kind_Reduction_Nand_Operator);
+            return Build_Unary_Factor_08
+              (Iir_Kind_Reduction_Nand_Operator, Prio);
          when Tok_Nor =>
-            return Build_Unary_Factor_08 (Iir_Kind_Reduction_Nor_Operator);
+            return Build_Unary_Factor_08
+              (Iir_Kind_Reduction_Nor_Operator, Prio);
          when Tok_Xor =>
-            return Build_Unary_Factor_08 (Iir_Kind_Reduction_Xor_Operator);
+            return Build_Unary_Factor_08
+              (Iir_Kind_Reduction_Xor_Operator, Prio);
          when Tok_Xnor =>
-            return Build_Unary_Factor_08 (Iir_Kind_Reduction_Xnor_Operator);
+            return Build_Unary_Factor_08
+              (Iir_Kind_Reduction_Xnor_Operator, Prio);
 
          when Tok_Exclam_Mark =>
             Error_Msg_Parse ("'!' is not allowed here, replaced by 'not'");
-            return Build_Unary_Factor (Iir_Kind_Not_Operator);
+            return Build_Unary_Factor (Iir_Kind_Not_Operator, Prio);
 
          when others =>
-            Left := Parse_Primary;
-            if Current_Token = Tok_Double_Star then
-               Res := Create_Iir (Iir_Kind_Exponentiation_Operator);
-               Set_Location (Res);
-
-               --  Skip '**'.
-               Scan;
-
-               Set_Left (Res, Left);
-               Set_Right (Res, Parse_Primary);
-               return Res;
-            else
-               return Left;
-            end if;
+            return Parse_Primary;
       end case;
    end Parse_Unary_Expression;
 
@@ -7140,6 +7155,7 @@ package body Vhdl.Parse is
    is
       Res : Iir;
       Expr : Iir;
+      Right : Iir;
       Op : Iir_Kind;
       Op_Prio : Prio_Type;
       Op_Tok : Token_Type;
@@ -7246,6 +7262,10 @@ package body Vhdl.Parse is
                Op := Iir_Kind_Xnor_Operator;
                Op_Prio := Prio_Logical;
 
+            when Tok_Double_Star =>
+               Op := Iir_Kind_Exponentiation_Operator;
+               Op_Prio := Prio_Factor;
+
             when others =>
                return Res;
          end case;
@@ -7275,13 +7295,14 @@ package body Vhdl.Parse is
             Scan;
          end if;
 
-         if Op_Prio >= Prio_Simple and then Current_Token in Token_Sign_Type
-         then
-            Error_Msg_Parse ("'-'/'+' can only appear before the first term");
-         end if;
-
          --  Left association: A + B + C is (A + B) + C
-         Set_Right (Expr, Parse_Expression (Prio_Type'Succ (Op_Prio)));
+         if Op_Prio = Prio_Factor then
+            --  Only for **
+            Right := Parse_Primary;
+         else
+            Right := Parse_Expression (Prio_Type'Succ (Op_Prio));
+         end if;
+         Set_Right (Expr, Right);
          Res := Expr;
 
          --  Only one relational_operator or shift_operator.
@@ -7346,7 +7367,7 @@ package body Vhdl.Parse is
                null;
          end case;
       else
-         Left := Parse_Unary_Expression;
+         Left := Parse_Unary_Expression (Prio);
          Res := Parse_Binary_Expression (Left, Prio);
       end if;
 
@@ -7606,6 +7627,68 @@ package body Vhdl.Parse is
       return Res;
    end Parse_Case_Expression;
 
+   --  [ LRM08 10.5.4 ]
+   --  selected_waveforms ::=
+   --    { waveform WHEN choices , }
+   --    waveform WHEN CHOICE
+   function Parse_Selected_Waveforms return Iir
+   is
+      First, Last : Iir;
+      Wf_Chain : Iir;
+      When_Loc : Location_Type;
+      Assoc : Iir;
+   begin
+      Chain_Init (First, Last);
+      loop
+         Wf_Chain := Parse_Waveform;
+         Expect (Tok_When, "'when' expected after waveform");
+         When_Loc := Get_Token_Location;
+
+         --  Eat 'when'.
+         Scan;
+
+         Parse_Choices (Null_Iir, When_Loc, Assoc);
+         Set_Associated_Chain (Assoc, Wf_Chain);
+         Chain_Append_Subchain (First, Last, Assoc);
+         exit when Current_Token /= Tok_Comma;
+         --  Skip ','.
+         Scan;
+      end loop;
+
+      return First;
+   end Parse_Selected_Waveforms;
+
+   --  [ LRM08 10.5.4 ]
+   --  selected_expressions ::=
+   --    { expression WHEN choices , }
+   --    expression WHEN CHOICE
+   function Parse_Selected_Expressions return Iir
+   is
+      First, Last : Iir;
+      Expr : Iir;
+      When_Loc : Location_Type;
+      Assoc : Iir;
+   begin
+      Chain_Init (First, Last);
+      loop
+         Expr := Parse_Expression;
+         Expect (Tok_When, "'when' expected after expression");
+         When_Loc := Get_Token_Location;
+
+         --  Eat 'when'.
+         Scan;
+
+         Parse_Choices (Null_Iir, When_Loc, Assoc);
+         Set_Associated_Expr (Assoc, Expr);
+         Chain_Append_Subchain (First, Last, Assoc);
+         exit when Current_Token /= Tok_Comma;
+         --  Skip ','.
+         Scan;
+      end loop;
+
+      return First;
+   end Parse_Selected_Expressions;
+
    --  precond : WITH
    --  postcond: ';'
    --
@@ -7623,21 +7706,26 @@ package body Vhdl.Parse is
    --  selected_waveform_assignment ::=
    --     WITH expression SELECT [?]
    --        target <= [ delay_mechanism ] selected_waveforms ;
-   function Parse_Selected_Signal_Assignment (Kind : Iir_Kind) return Iir
+   --
+   --  [ LRM08 10.6.4 ]
+   --  selected_variable_assignment ::=
+   --    WITH expression SELECT [?]
+   --        target := selected_expressions ;
+   function Parse_Selected_Assignment
+     (Sig_Kind : Iir_Kind; Var_Kind : Iir_Kind) return Iir
    is
+      Kind : Iir_Kind;
+      Expr : Iir;
       Res : Iir;
-      Assoc : Iir;
-      Wf_Chain : Iir_Waveform_Element;
       Target : Iir;
-      First, Last : Iir;
-      When_Loc : Location_Type;
+      With_Loc : Location_Type;
    begin
+      With_Loc := Get_Token_Location;
+
       --  Skip 'with'.
       Scan;
 
-      Res := Create_Iir (Kind);
-      Set_Location (Res);
-      Set_Expression (Res, Parse_Case_Expression);
+      Expr := Parse_Case_Expression;
 
       Expect_Scan (Tok_Select, "'select' expected after expression");
 
@@ -7646,38 +7734,45 @@ package body Vhdl.Parse is
       else
          Target := Parse_Name (Allow_Indexes => True);
       end if;
+
+      case Current_Token is
+         when Tok_Less_Equal =>
+            Kind := Sig_Kind;
+         when Tok_Assign =>
+            if Var_Kind = Iir_Kind_Error then
+               Error_Msg_Parse ("'<=' is expected instead of ':='");
+               Kind := Sig_Kind;
+            else
+               Kind := Var_Kind;
+            end if;
+         when others =>
+            Error_Msg_Parse ("'<=' expected after target");
+            Kind := Sig_Kind;
+      end case;
+
+      Res := Create_Iir (Kind);
+      Set_Location (Res, With_Loc);
+      Set_Expression (Res, Expr);
       Set_Target (Res, Target);
-      Expect_Scan (Tok_Less_Equal);
+
+      --  Skip '<=' or ':='.
+      Scan;
 
       case Kind is
          when Iir_Kind_Concurrent_Selected_Signal_Assignment =>
             Parse_Options (Res);
+            Set_Selected_Waveform_Chain (Res, Parse_Selected_Waveforms);
          when Iir_Kind_Selected_Waveform_Assignment_Statement =>
             Parse_Delay_Mechanism (Res);
+            Set_Selected_Waveform_Chain (Res, Parse_Selected_Waveforms);
+         when Iir_Kind_Selected_Variable_Assignment_Statement =>
+            Set_Selected_Expressions_Chain (Res, Parse_Selected_Expressions);
          when others =>
             raise Internal_Error;
       end case;
 
-      Chain_Init (First, Last);
-      loop
-         Wf_Chain := Parse_Waveform;
-         Expect (Tok_When, "'when' expected after waveform");
-         When_Loc := Get_Token_Location;
-
-         --  Eat 'when'.
-         Scan;
-
-         Parse_Choices (Null_Iir, When_Loc, Assoc);
-         Set_Associated_Chain (Assoc, Wf_Chain);
-         Chain_Append_Subchain (First, Last, Assoc);
-         exit when Current_Token /= Tok_Comma;
-         --  Skip ','.
-         Scan;
-      end loop;
-      Set_Selected_Waveform_Chain (Res, First);
-
       return Res;
-   end Parse_Selected_Signal_Assignment;
+   end Parse_Selected_Assignment;
 
    --  precond : next token
    --  postcond: next token.
@@ -8703,8 +8798,9 @@ package body Vhdl.Parse is
                   end if;
                end;
             when Tok_With =>
-               Stmt := Parse_Selected_Signal_Assignment
-                 (Iir_Kind_Selected_Waveform_Assignment_Statement);
+               Stmt := Parse_Selected_Assignment
+                 (Iir_Kind_Selected_Waveform_Assignment_Statement,
+                  Iir_Kind_Selected_Variable_Assignment_Statement);
 
             when Tok_Return =>
                Stmt := Create_Iir (Iir_Kind_Return_Statement);
@@ -9536,20 +9632,21 @@ package body Vhdl.Parse is
    --  [ LRM93 9.1 ]
    --  block_header ::= [ generic_clause [ generic_map_aspect ; ] ]
    --                   [ port_clause [ port_map_aspect ; ] ]
-   function Parse_Block_Header return Iir_Block_Header is
+   function Parse_Block_Header (Parent : Iir) return Iir_Block_Header
+   is
       Res : Iir_Block_Header;
    begin
       Res := Create_Iir (Iir_Kind_Block_Header);
       Set_Location (Res);
       if Current_Token = Tok_Generic then
-         Set_Generic_Chain (Res, Parse_Generic_Clause (Res));
+         Set_Generic_Chain (Res, Parse_Generic_Clause (Parent));
          if Current_Token = Tok_Generic then
             Set_Generic_Map_Aspect_Chain (Res, Parse_Generic_Map_Aspect);
             Scan_Semi_Colon ("generic map aspect");
          end if;
       end if;
       if Current_Token = Tok_Port then
-         Parse_Port_Clause (Res);
+         Set_Port_Chain (Res, Parse_Port_Clause (Parent));
          if Current_Token = Tok_Port then
             Set_Port_Map_Aspect_Chain (Res, Parse_Port_Map_Aspect);
             Scan_Semi_Colon ("port map aspect");
@@ -9620,7 +9717,7 @@ package body Vhdl.Parse is
          Scan;
       end if;
       if Current_Token = Tok_Generic or Current_Token = Tok_Port then
-         Set_Block_Header (Res, Parse_Block_Header);
+         Set_Block_Header (Res, Parse_Block_Header (Res));
       end if;
       if Current_Token /= Tok_Begin then
          Parse_Declarative_Part (Res, Res);
@@ -9635,6 +9732,7 @@ package body Vhdl.Parse is
 
       if Flag_Elocations then
          Create_Elocations (Res);
+         Set_Start_Location (Res, Loc);
          Set_Begin_Location (Res, Begin_Loc);
          Set_End_Location (Res, Get_Token_Location);
       end if;
@@ -10915,8 +11013,9 @@ package body Vhdl.Parse is
                   Expect_Scan (Tok_Semi_Colon);
                end if;
             when Tok_With =>
-               Stmt := Parse_Selected_Signal_Assignment
-                 (Iir_Kind_Concurrent_Selected_Signal_Assignment);
+               Stmt := Parse_Selected_Assignment
+                 (Iir_Kind_Concurrent_Selected_Signal_Assignment,
+                  Iir_Kind_Error);
                Expect_Scan (Tok_Semi_Colon,
                             "';' expected at end of signal assignment");
 

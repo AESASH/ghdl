@@ -62,7 +62,9 @@ package body Vhdl.Sem is
    end Add_Dependence;
 
    --  LRM 1.1  Entity declaration.
-   procedure Sem_Entity_Declaration (Entity : Iir_Entity_Declaration) is
+   procedure Sem_Entity_Declaration (Entity : Iir_Entity_Declaration)
+   is
+      Generics : constant Iir := Get_Generic_Chain (Entity);
    begin
       Xrefs.Xref_Decl (Entity);
       Sem_Scopes.Add_Name (Entity);
@@ -76,7 +78,25 @@ package body Vhdl.Sem is
       Open_Declarative_Region;
 
       -- Sem generics.
-      Sem_Interface_Chain (Get_Generic_Chain (Entity), Generic_Interface_List);
+      Sem_Interface_Chain (Generics, Generic_Interface_List);
+
+      --  Set macro-expanded flag.
+      declare
+         Gen : Iir;
+      begin
+         Gen := Generics;
+         while Gen /= Null_Iir loop
+            case Get_Kind (Gen) is
+               when Iir_Kind_Interface_Type_Declaration
+                 | Iir_Kinds_Interface_Subprogram_Declaration =>
+                  Set_Macro_Expanded_Flag (Entity, True);
+                  exit;
+               when others =>
+                  null;
+            end case;
+            Gen := Get_Chain (Gen);
+         end loop;
+      end;
 
       -- Sem ports.
       Sem_Interface_Chain (Get_Port_Chain (Entity), Port_Interface_List);
@@ -2117,6 +2137,70 @@ package body Vhdl.Sem is
       Add_Element (List, El);
    end Add_Analysis_Checks_List;
 
+   procedure Clear_Suspend_Flag (N : Iir);
+
+   procedure Clear_Suspend_Flag_Chain (N : Iir)
+   is
+      El : Iir;
+   begin
+      El := N;
+      while El /= Null_Iir loop
+         Clear_Suspend_Flag (El);
+         El := Get_Chain (El);
+      end loop;
+   end Clear_Suspend_Flag_Chain;
+
+   procedure Clear_Suspend_Flag (N : Iir) is
+   begin
+      case Iir_Kinds_Sequential_Statement (Get_Kind (N)) is
+         when Iir_Kind_Procedure_Call_Statement =>
+            Set_Suspend_Flag (N, False);
+         when Iir_Kind_For_Loop_Statement
+           | Iir_Kind_While_Loop_Statement =>
+            Set_Suspend_Flag (N, False);
+            Clear_Suspend_Flag_Chain (Get_Sequential_Statement_Chain (N));
+         when Iir_Kind_Case_Statement =>
+            declare
+               Ch : Iir;
+               Stmts : Iir;
+            begin
+               Set_Suspend_Flag (N, False);
+               Ch := Get_Case_Statement_Alternative_Chain (N);
+               while Ch /= Null_Iir loop
+                  Stmts := Get_Associated_Chain (Ch);
+                  if Stmts /= Null_Iir then
+                     Clear_Suspend_Flag_Chain (Stmts);
+                  end if;
+                  Ch := Get_Chain (Ch);
+               end loop;
+            end;
+         when Iir_Kind_If_Statement =>
+            Set_Suspend_Flag (N, False);
+            Clear_Suspend_Flag_Chain (Get_Sequential_Statement_Chain (N));
+            declare
+               Els : Iir;
+            begin
+               Els := Get_Else_Clause (N);
+               while Els /= Null_Iir loop
+                  Clear_Suspend_Flag_Chain
+                    (Get_Sequential_Statement_Chain (Els));
+                  Els := Get_Else_Clause (Els);
+               end loop;
+            end;
+         when Iir_Kinds_Signal_Assignment_Statement
+           | Iir_Kinds_Variable_Assignment_Statement
+           | Iir_Kind_Null_Statement
+           | Iir_Kind_Assertion_Statement
+           | Iir_Kind_Report_Statement
+           | Iir_Kinds_Next_Exit_Statement
+           | Iir_Kind_Return_Statement
+           | Iir_Kind_Break_Statement =>
+            null;
+         when Iir_Kind_Wait_Statement =>
+            raise Internal_Error;
+      end case;
+   end Clear_Suspend_Flag;
+
    procedure Sem_Subprogram_Body (Subprg : Iir)
    is
       Spec : constant Iir := Get_Subprogram_Specification (Subprg);
@@ -2240,6 +2324,21 @@ package body Vhdl.Sem is
                      Next (Callees_It);
                   end loop;
                end;
+            end if;
+
+            --  There is no wait in this procedure (either directly or
+            --  indirectly).  So can clear the suspend flag.
+            if Get_Suspend_Flag (Subprg)
+              and then Get_Wait_State (Spec) = False
+            then
+               --  Clear spec only if it has never been used.
+               if Get_Chain (Spec) = Subprg then
+                  Set_Suspend_Flag (Spec, False);
+               end if;
+               --  Clear recursively.
+               Set_Suspend_Flag (Subprg, False);
+               Clear_Suspend_Flag_Chain
+                 (Get_Sequential_Statement_Chain (Subprg));
             end if;
 
             --  Do not add to Analysis_Checks_List as procedures can't
@@ -2899,43 +2998,6 @@ package body Vhdl.Sem is
       return False;
    end Is_Package_Macro_Expanded;
 
-   --  Mark declarations of HDR elaboration status to FLAG.
-   --  Set to true at then end of a package declaration, but reset at the
-   --  beginning of body analysis.
-   procedure Mark_Declarations_Elaborated (Hdr : Iir; Flag : Boolean)
-   is
-      Decl : Iir;
-   begin
-      Decl := Get_Declaration_Chain (Hdr);
-      while Decl /= Null_Iir loop
-         case Get_Kind (Decl) is
-            when Iir_Kinds_Subprogram_Declaration =>
-               --  The flag can always be set, but not cleared on implicit
-               --  subprograms.
-               if Flag
-                 or else
-                 Get_Implicit_Definition (Decl) not in Iir_Predefined_Implicit
-               then
-                  Set_Elaborated_Flag (Decl, Flag);
-               end if;
-            when Iir_Kind_Type_Declaration =>
-               declare
-                  Def : constant Iir := Get_Type_Definition (Decl);
-               begin
-                  if Get_Kind (Def) = Iir_Kind_Protected_Type_Declaration then
-                     --  Mark the protected type as elaborated.
-                     --  Mark the methods as elaborated.
-                     Set_Elaborated_Flag (Def, Flag);
-                     Mark_Declarations_Elaborated (Def, Flag);
-                  end if;
-               end;
-            when others =>
-               null;
-         end case;
-         Decl := Get_Chain (Decl);
-      end loop;
-   end Mark_Declarations_Elaborated;
-
    --  LRM 2.5  Package Declarations.
    procedure Sem_Package_Declaration (Pkg : Iir_Package_Declaration)
    is
@@ -3029,10 +3091,12 @@ package body Vhdl.Sem is
    procedure Sem_Package_Body (Decl : Iir)
    is
       Package_Ident : constant Name_Id := Get_Identifier (Decl);
+      Is_Top_Level : constant Boolean := not Is_Nested_Package (Decl);
       Package_Decl : Iir;
+      Implicit : Implicit_Declaration_Type;
    begin
       -- First, find the package declaration.
-      if not Is_Nested_Package (Decl) then
+      if Is_Top_Level then
          declare
             Design_Unit: Iir_Design_Unit;
          begin
@@ -3105,11 +3169,23 @@ package body Vhdl.Sem is
       --     body (if any).
       Open_Declarative_Region;
 
+      if Is_Top_Level then
+         Push_Signals_Declarative_Part (Implicit, Decl);
+      end if;
+
       Sem_Scopes.Add_Package_Declarations (Package_Decl);
 
       Sem_Declaration_Chain (Decl);
+
+      --  Check presence of bodies for declarations in the package body.
       Check_Full_Declaration (Decl, Decl);
+
+      --  Check presence of bodies for declarations in the package declaration.
       Check_Full_Declaration (Package_Decl, Decl);
+
+      if Is_Top_Level then
+         Pop_Signals_Declarative_Part (Implicit);
+      end if;
 
       Close_Declarative_Region;
       Set_Is_Within_Flag (Package_Decl, False);
@@ -3150,6 +3226,7 @@ package body Vhdl.Sem is
       Hdr : Iir;
       Pkg : Iir;
       Bod : Iir_Design_Unit;
+      Parent : Iir;
    begin
       Sem_Scopes.Add_Name (Decl);
       Set_Visible_Flag (Decl, True);
@@ -3199,6 +3276,21 @@ package body Vhdl.Sem is
       --  Instantiate the declaration after analyse of the body.  So that
       --  the use_flag on the declaration can be propagated to the instance.
       Sem_Inst.Instantiate_Package_Declaration (Decl, Pkg);
+
+      --  LRM08 4.9 Package instantiation declarations
+      --  If the package instantiation declaration occurs immediately within
+      --  an encloding package declaration [...], the generic-mapped package
+      --  body occurs at the end of the package body corresponding to the
+      --  enclosing package declaration.
+      Parent := Get_Parent (Decl);
+      if Get_Kind (Parent) = Iir_Kind_Package_Declaration then
+         Set_Immediate_Body_Flag (Decl, False);
+         Mark_Declarations_Elaborated (Decl, False);
+      else
+         if Get_Need_Body (Pkg) then
+            Set_Immediate_Body_Flag (Decl, True);
+         end if;
+      end if;
    end Sem_Package_Instantiation_Declaration;
 
    --  LRM 10.4  Use Clauses.

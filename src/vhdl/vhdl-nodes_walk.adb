@@ -73,6 +73,7 @@ package body Vhdl.Nodes_Walk is
            | Iir_Kind_Exit_Statement
            | Iir_Kind_Variable_Assignment_Statement
            | Iir_Kind_Conditional_Variable_Assignment_Statement
+           | Iir_Kind_Selected_Variable_Assignment_Statement
            | Iir_Kind_Break_Statement
            | Iir_Kind_Suspend_State_Statement =>
             null;
@@ -186,6 +187,21 @@ package body Vhdl.Nodes_Walk is
                     (Get_Concurrent_Statement_Chain
                        (Get_Generate_Statement_Body (Cl)), Cb);
                   Cl := Get_Generate_Else_Clause (Cl);
+               end loop;
+            end;
+         when Iir_Kind_Case_Generate_Statement =>
+            declare
+               Ch : Node;
+            begin
+               Status := Cb.all (Stmt);
+               Ch := Get_Case_Statement_Alternative_Chain (Stmt);
+               while Status = Walk_Continue and then Ch /= Null_Node loop
+                  if not Get_Same_Alternative_Flag (Ch) then
+                     Status := Walk_Concurrent_Statements_Chain
+                       (Get_Concurrent_Statement_Chain
+                          (Get_Associated_Block (Ch)), Cb);
+                  end if;
+                  Ch := Get_Chain (Ch);
                end loop;
             end;
          when others =>

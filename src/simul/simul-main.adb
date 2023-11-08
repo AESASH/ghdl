@@ -28,23 +28,38 @@ with Simul.Vhdl_Elab;
 
 with Grt.Types; use Grt.Types;
 with Grt.Vhdl_Types; use Grt.Vhdl_Types;
-with Grt.Stdio;
+with Grt.Stdio; use Grt.Stdio;
 with Grt.Options;
 with Grt.Processes;
 with Grt.Errors;
-with Grt.Analog_Solver;
 with Grt.Main;
+with Grt.Disp_Signals;
 
 package body Simul.Main is
    Ghdl_Progname : constant String := "ghdl" & ASCII.Nul;
 
-   procedure Ghdl_Elaborate;
-   pragma Export (C, Ghdl_Elaborate, "__ghdl_ELABORATE");
-
-   procedure Ghdl_Elaborate is
+   procedure Csv_File_Open is
    begin
-      Elaborate_Proc.all;
-   end Ghdl_Elaborate;
+      if Csv_Filename /= null then
+         if Csv_Filename.all = "-" then
+            Csv_File := stdout;
+         else
+            declare
+               Filename : constant String := Csv_Filename.all & ASCII.NUL;
+               W : constant String := 'w' & ASCII.NUL;
+            begin
+               Csv_File := fopen (Filename'Address, W'Address);
+               if Csv_File = NULL_Stream then
+                  Grt.Errors.Error_S ("cannot open '");
+                  Grt.Errors.Diag_C (Csv_Filename.all);
+                  Grt.Errors.Error_E ("' for --wave-csv");
+               end if;
+            end;
+         end if;
+      else
+         Csv_File := NULL_Stream;
+      end if;
+   end Csv_File_Open;
 
    procedure Simulation
    is
@@ -77,23 +92,18 @@ package body Simul.Main is
       --  Copy flag.
       Synth.Flags.Severity_Level := Grt.Options.Severity_Level;
 
-      --  Not supported.
-      Grt.Options.Trace_Signals := False;
-
       if Flag_Interractive then
          Elab.Debugger.Debug_Elab (Vhdl_Elab.Top_Instance);
       end if;
 
       Grt.Errors.Set_Error_Stream (Grt.Stdio.stdout);
 
+      Csv_File_Open;
+
       Status := Grt.Main.Run_Through_Longjump
         (Grt.Processes.Simulation_Init'Access);
 
       if Status = 0 then
-         if Grt.Processes.Flag_AMS then
-            Grt.Analog_Solver.Start;
-         end if;
-
          pragma Assert (Areapools.Is_Empty (Expr_Pool));
          pragma Assert (Areapools.Is_Empty (Process_Pool));
 
@@ -105,8 +115,13 @@ package body Simul.Main is
             Status := Grt.Main.Run_Through_Longjump
               (Grt.Processes.Simulation_Cycle'Access);
             exit when Status < 0
-              or Status = Grt.Errors.Run_Stop
-              or Status = Grt.Errors.Run_Finished;
+              or Status = Grt.Errors.Run_Stop;
+
+            if Grt.Options.Trace_Signals then
+               Grt.Disp_Signals.Disp_All_Signals;
+            end if;
+
+            exit when Status = Grt.Errors.Run_Finished;
 
             if Break_Step
               or else (Current_Time >= Break_Time

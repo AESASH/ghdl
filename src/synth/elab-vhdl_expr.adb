@@ -19,6 +19,7 @@
 with Types; use Types;
 with Name_Table;
 with Str_Table;
+with Errorout;
 
 with Netlists;
 
@@ -26,11 +27,13 @@ with Vhdl.Errors; use Vhdl.Errors;
 with Vhdl.Scanner;
 with Vhdl.Utils; use Vhdl.Utils;
 with Vhdl.Evaluation; use Vhdl.Evaluation;
+with Vhdl.Sem_Expr;
 
 with Elab.Memtype; use Elab.Memtype;
 with Elab.Vhdl_Heap; use Elab.Vhdl_Heap;
 with Elab.Vhdl_Types; use Elab.Vhdl_Types;
 with Elab.Vhdl_Errors; use Elab.Vhdl_Errors;
+with Elab.Vhdl_Insts;
 
 with Synth.Vhdl_Expr; use Synth.Vhdl_Expr;
 with Synth.Vhdl_Eval; use Synth.Vhdl_Eval;
@@ -40,7 +43,7 @@ with Grt.Types;
 with Grt.Vhdl_Types;
 with Grt.Strings;
 with Grt.To_Strings;
-with Grt.Vstrings;
+with Grt.Rstrings;
 
 package body Elab.Vhdl_Expr is
    function Synth_Bounds_From_Length (Atype : Node; Len : Int32)
@@ -99,6 +102,495 @@ package body Elab.Vhdl_Expr is
    begin
       return Synth_Subtype_Conversion (null, Vt, Dtype, Bounds, Loc);
    end Exec_Subtype_Conversion;
+
+   function Synth_Pathname_Object (Loc_Inst : Synth_Instance_Acc;
+                                   Name : Node;
+                                   Cur_Inst : Synth_Instance_Acc;
+                                   Path : Node) return Valtyp
+   is
+      use Errorout;
+      Id : constant Name_Id := Get_Identifier (Path);
+      Scope : constant Node := Get_Source_Scope (Cur_Inst);
+      Obj : Node;
+      Res : Valtyp;
+      Name_Typ : Type_Acc;
+   begin
+      --  Object simple name.
+      case Get_Kind (Scope) is
+         when Iir_Kind_Generate_Statement_Body
+           | Iir_Kind_Block_Statement
+           | Iir_Kind_Package_Declaration
+           | Iir_Kind_Package_Instantiation_Declaration =>
+            Obj := Find_Name_In_Chain (Get_Declaration_Chain (Scope), Id);
+         when Iir_Kind_Architecture_Body =>
+            Obj := Find_Name_In_Chain (Get_Declaration_Chain (Scope), Id);
+            if Obj = Null_Node then
+               --  Try ports / generics
+               declare
+                  Ent : constant Node := Get_Entity (Scope);
+               begin
+                  Obj := Find_Name_In_Chain (Get_Port_Chain (Ent), Id);
+                  if Obj = Null_Node then
+                     Obj := Find_Name_In_Chain (Get_Generic_Chain (Ent), Id);
+                  end if;
+               end;
+            end if;
+         when others =>
+            Error_Kind ("synth_pathname_object(1)", Scope);
+      end case;
+
+      --  LRM08 8.7 External names
+      --  It is an error when evaluating an external name if the identified
+      --  declarative region does not contain a declaration of an object
+      --  whose simple name is the object simple name of the external
+      --  pathname.
+      if Obj = Null_Node then
+         Error_Msg_Synth
+           (Loc_Inst, Path, "cannot find object %i in %i", (+Id, +Scope));
+         return No_Valtyp;
+      end if;
+
+      --  LRM08 8.7 External names
+      --  It is also an error when evaluating an external name if the object
+      --  denoted by an external constant name is not a constant, or if the
+      --  object denoted by an external signal name is not a signal, or if
+      --  the object denoted by an external variable name is not a variable.
+      case Get_Kind (Obj) is
+         when Iir_Kind_Signal_Declaration
+           | Iir_Kind_Interface_Signal_Declaration =>
+            case Iir_Kinds_External_Name (Get_Kind (Name)) is
+               when Iir_Kind_External_Signal_Name =>
+                  Res := Get_Value (Cur_Inst, Obj);
+               when Iir_Kind_External_Constant_Name
+                 | Iir_Kind_External_Variable_Name =>
+                  Error_Msg_Synth
+                    (Loc_Inst, Path,
+                     "denoted object name %i is a not a signal", +Obj);
+                  return No_Valtyp;
+            end case;
+         when Iir_Kind_Variable_Declaration =>
+            case Iir_Kinds_External_Name (Get_Kind (Name)) is
+               when Iir_Kind_External_Variable_Name =>
+                  Res := Get_Value (Cur_Inst, Obj);
+               when Iir_Kind_External_Constant_Name
+                 | Iir_Kind_External_Signal_Name =>
+                  Error_Msg_Synth
+                    (Loc_Inst, Path,
+                     "denoted object name %i is a not a variable", +Obj);
+                  return No_Valtyp;
+            end case;
+         when Iir_Kind_Constant_Declaration
+           | Iir_Kind_Interface_Constant_Declaration =>
+            case Iir_Kinds_External_Name (Get_Kind (Name)) is
+               when Iir_Kind_External_Constant_Name =>
+                  Res := Get_Value (Cur_Inst, Obj);
+               when Iir_Kind_External_Variable_Name
+                 | Iir_Kind_External_Signal_Name =>
+                  Error_Msg_Synth
+                    (Loc_Inst, Path,
+                     "denoted object name %i is a not a constant", +Obj);
+                  return No_Valtyp;
+            end case;
+         when others =>
+            Error_Kind ("synth_pathname_object(2)", Obj);
+      end case;
+
+      --  LRM08 8.7 External names
+      --  Moreover, it is an error if the base type of the object denoted by
+      --  an external name is not the same as the base type mark in the
+      --  subtype indication of the external name.
+      declare
+         Obj_Type : constant Node := Get_Type (Obj);
+         Name_Type : constant Node := Get_Type (Name);
+      begin
+         if Get_Base_Type (Obj_Type) /= Get_Base_Type (Name_Type) then
+            Error_Msg_Synth
+              (Loc_Inst, Path, "external name and object have different type");
+            return No_Valtyp;
+         end if;
+
+         Name_Typ := Synth_Subtype_Indication
+           (Loc_Inst, Get_Subtype_Indication (Name));
+      end;
+
+      --  LRM08 8.7 External names
+      --  If the subtype indication denotes a composite subtype, then the
+      --  object denoted by the external name is viewed as if it were of the
+      --  subtype specified by the subtype indication.  For each index range,
+      --  if any, in the subtype, if the subtype defines the index range, the
+      --  object is viewed with that index range; otherwise, the object
+      --  is viewed with the index range of the object.  The view specified
+      --  by the subtype shall include a matching element (see 9.2.3) for
+      --  each element of the object denoted by the external name.
+      --
+      --  If the subtype indication denotes a scalar subtype, then the object
+      --  denoted by the external name is viewed as if it were of the subtype
+      --  specified by the subtype indication; moreover, it is a error when
+      --  evaluating the external name if this subtype does not have the same
+      --  bounds and direction as the subtype of the object denoted by the
+      --  external name.
+
+      case Name_Typ.Kind is
+         when Type_Bit
+           | Type_Logic
+           | Type_Discrete =>
+            if Name_Typ.Drange /= Res.Typ.Drange then
+               Error_Msg_Synth
+                 (Loc_Inst, Name, "bounds mismatch between name and object");
+            end if;
+         when Type_Float =>
+            if Name_Typ.Frange /= Res.Typ.Frange then
+               Error_Msg_Synth
+                 (Loc_Inst, Name, "bounds mismatch between name and object");
+            end if;
+         when Type_Vector
+           | Type_Unbounded_Vector
+           | Type_Array
+           | Type_Array_Unbounded
+           | Type_Unbounded_Array
+           | Type_Unbounded_Record
+           | Type_Record =>
+            Res := Synth_Subtype_Conversion
+              (Loc_Inst, Res, Name_Typ, True, Name);
+         when Type_Protected
+           | Type_File
+           | Type_Access =>
+            null;
+         when Type_Slice =>
+            raise Internal_Error;
+      end case;
+
+      return Res;
+   end Synth_Pathname_Object;
+
+   function Synth_Pathname (Loc_Inst : Synth_Instance_Acc;
+                            Name : Node;
+                            Cur_Inst : Synth_Instance_Acc;
+                            Path : Node) return Valtyp
+   is
+      use Errorout;
+      Suffix : constant Node := Get_Pathname_Suffix (Path);
+      Expr : constant Node := Get_Pathname_Expression (Path);
+      Id : Name_Id;
+      Scope : Node;
+      Res : Node;
+      Sub_Inst : Synth_Instance_Acc;
+   begin
+      if Suffix = Null_Node then
+         --  Object simple name.
+         return Synth_Pathname_Object (Loc_Inst, Name, Cur_Inst, Path);
+      end if;
+
+      Id := Get_Identifier (Path);
+      Scope := Get_Source_Scope (Cur_Inst);
+
+      --  Find name in concurrent statements.
+      case Get_Kind (Scope) is
+         when Iir_Kind_Architecture_Body
+           | Iir_Kind_Block_Statement =>
+            Res := Find_Name_In_Chain
+              (Get_Concurrent_Statement_Chain (Scope), Id);
+         when Iir_Kind_Package_Declaration =>
+            Res := Find_Name_In_Chain
+              (Get_Declaration_Chain (Scope), Id);
+         when others =>
+            Error_Kind ("synth_pathname(scope)", Scope);
+      end case;
+      if Res = Null_Node then
+         Error_Msg_Synth
+           (Loc_Inst, Path,
+            "cannot find path element %i in %i", (+Id, +Scope));
+         return No_Valtyp;
+      end if;
+
+      --  Check that expression is valid only for for-generate statement
+      --  TODO: is it an error according to LRM08 ?
+      if Expr /= Null_Node
+        and then Get_Kind (Res) /= Iir_Kind_For_Generate_Statement
+      then
+         Error_Msg_Synth
+           (Loc_Inst, Path,
+            "index expression valid only for generate statements");
+         return No_Valtyp;
+      end if;
+
+      --  Check if pathname element is elaborated.
+      case Get_Kind (Res) is
+         when Iir_Kind_Component_Instantiation_Statement
+            | Iir_Kind_If_Generate_Statement
+            | Iir_Kind_For_Generate_Statement
+            | Iir_Kind_Package_Declaration
+            | Iir_Kind_Block_Statement =>
+            if not Is_Elaborated (Cur_Inst, Res) then
+               Error_Msg_Synth
+                 (Loc_Inst, Path, "%n is not yet elaborated", +Res);
+               return No_Valtyp;
+            end if;
+         when Iir_Kind_Process_Statement =>
+            --  And other concurrent statements...
+            --  and other declarations
+            null;
+         when others =>
+            Error_Kind ("synth_pathname(2a)", Res);
+      end case;
+
+      case Get_Kind (Res) is
+         when Iir_Kind_Component_Instantiation_Statement =>
+            Sub_Inst := Get_Sub_Instance (Cur_Inst, Res);
+            if not Is_Entity_Instantiation (Res) then
+               Sub_Inst := Get_Component_Instance (Sub_Inst);
+               if Cur_Inst = null then
+                  Error_Msg_Synth
+                    (Loc_Inst, Path, "component for %i is not bound", +Res);
+                  return No_Valtyp;
+               end if;
+            end if;
+         when Iir_Kind_If_Generate_Statement =>
+            Sub_Inst := Get_Sub_Instance (Cur_Inst, Res);
+            if Sub_Inst = null then
+               Error_Msg_Synth
+                 (Loc_Inst, Path, "condition of generate statement is false");
+               return No_Valtyp;
+            end if;
+         when Iir_Kind_For_Generate_Statement =>
+            declare
+               use Vhdl.Sem_Expr;
+               Param : constant Node := Get_Parameter_Specification (Res);
+               Param_Rng : Type_Acc;
+               Idx : Valtyp;
+               V : Int64;
+               V_Off : Natural;
+               Gen_Inst : Synth_Instance_Acc;
+            begin
+               --  LRM08 8.7 External names
+               --  If the generate statement is a for generate statement, the
+               --  pathname element shall include a static expression, [...]
+               if Expr = Null_Node then
+                  Error_Msg_Synth
+                    (Loc_Inst, Path,
+                     "expression required for a for-generate statement");
+                  return No_Valtyp;
+               end if;
+
+               --  [...] the type of the expressoin shall be the same as the
+               --  type of the generate parameter, [...]
+               if Are_Nodes_Compatible (Expr, Param) = Not_Compatible then
+                  Error_Msg_Synth
+                    (Loc_Inst, Path,
+                     "expression and generate parameter are not compatible");
+                  return No_Valtyp;
+               end if;
+
+               --  [...] and the value of the expression shall belong to the
+               --  discrete range specified for the generate parameter.
+               Param_Rng := Get_Subtype_Object (Loc_Inst, Get_Type (Param));
+               Idx := Synth_Expression_With_Type (Loc_Inst, Expr, Param_Rng);
+               if Idx = No_Valtyp then
+                  return No_Valtyp;
+               end if;
+               V := Read_Discrete (Idx);
+               if not In_Range (Param_Rng.Drange, V) then
+                  Error_Msg_Synth
+                    (Loc_Inst, Path,
+                     "expression not in the range of the generate parameter");
+                  return No_Valtyp;
+               end if;
+               case Param_Rng.Drange.Dir is
+                  when Dir_To =>
+                     V_Off := Natural (V - Param_Rng.Drange.Left);
+                  when Dir_Downto =>
+                     V_Off := Natural (Param_Rng.Drange.Left - V);
+               end case;
+               Gen_Inst := Get_Sub_Instance (Cur_Inst, Res);
+               Sub_Inst := Get_Generate_Sub_Instance (Gen_Inst, V_Off + 1);
+            end;
+         when Iir_Kind_Package_Declaration =>
+            if Is_Uninstantiated_Package (Res) then
+               Error_Msg_Synth
+                 (Loc_Inst, Path,
+                  "pathname element %i designates an uninstantiated package",
+                  +Id);
+               return No_Valtyp;
+            end if;
+            Sub_Inst := Get_Sub_Instance (Cur_Inst, Res);
+         when Iir_Kind_Block_Statement =>
+            Sub_Inst := Get_Sub_Instance (Cur_Inst, Res);
+         when Iir_Kind_Process_Statement =>
+            --  And other concurrent statements...
+            --  and other declarations
+            Error_Msg_Synth
+              (Loc_Inst, Path,
+               "pathname element %i does not denote a concurrent region",
+               +Id);
+            return No_Valtyp;
+         when others =>
+            Error_Kind ("synth_pathname(2)", Res);
+      end case;
+      return Synth_Pathname (Loc_Inst, Name, Sub_Inst, Suffix);
+   end Synth_Pathname;
+
+   function Exec_Absolute_Pathname
+     (Syn_Inst : Synth_Instance_Acc; Name : Node; Path : Node) return Valtyp
+   is
+      Path_Inst : constant Synth_Instance_Acc := Elab.Vhdl_Insts.Top_Instance;
+      Top_Arch : constant Node := Get_Source_Scope (Path_Inst);
+      Top_Ent : constant Node := Get_Entity (Top_Arch);
+      Suffix : constant Node := Get_Pathname_Suffix (Path);
+   begin
+      if Get_Identifier (Top_Ent) /= Get_Identifier (Suffix) then
+         Error_Msg_Synth
+           (Syn_Inst, Path,
+            "expect %i instead of %i for root of absolute pathname",
+            (+Top_Ent, +Suffix));
+         return No_Valtyp;
+      end if;
+
+      return Synth_Pathname
+        (Syn_Inst, Name, Path_Inst, Get_Pathname_Suffix (Suffix));
+   end Exec_Absolute_Pathname;
+
+   --  Find the corresponding concurrent region from SCOPE.
+   function Exec_Pathname_Concurrent_Region (Scope : Synth_Instance_Acc)
+                                            return Synth_Instance_Acc
+   is
+      Cur_Inst : Synth_Instance_Acc;
+      Cur_Src : Node;
+   begin
+      --  LRM08 8.7 External names
+      --  For a relative pathname, the innermost concurrent region is
+      --  initially identifier, where a concurrent region is defined
+      --  recursively to be
+      --  - A block declarative region (including an external block and
+      --    any block equivalet to a generate statement), or
+      --  - A package declarative region (including a generic-mapped package
+      --    equivalent to a package instantiation) declared immediately within
+      --    a concurrent region.
+      Cur_Inst := Scope;
+      loop
+         Cur_Src := Get_Source_Scope (Cur_Inst);
+         if Cur_Src = Null_Node then
+            --  Top level.
+            return null;
+         end if;
+         case Get_Kind (Cur_Src) is
+            when Iir_Kind_Architecture_Body
+               | Iir_Kind_Entity_Declaration
+               | Iir_Kind_Block_Statement
+               | Iir_Kind_Generate_Statement_Body =>
+               return Cur_Inst;
+            when Iir_Kind_Process_Statement
+              | Iir_Kind_Function_Body
+              | Iir_Kind_Procedure_Body =>
+               null;
+            when Iir_Kind_Package_Declaration =>
+               --  Check if it is within a concurrent region.
+               declare
+                  Sub_Inst : constant Synth_Instance_Acc :=
+                    Get_Instance_Parent (Cur_Inst);
+               begin
+                  if Exec_Pathname_Concurrent_Region (Sub_Inst) /= null then
+                     return Cur_Inst;
+                  else
+                     return null;
+                  end if;
+               end;
+            when others =>
+               Error_Kind ("exec_pathname_concurrent_region", Cur_Src);
+         end case;
+         Cur_Inst := Get_Instance_Parent (Cur_Inst);
+         pragma Assert (Cur_Inst /= null);
+      end loop;
+   end Exec_Pathname_Concurrent_Region;
+
+   function Exec_Relative_Pathname
+     (Syn_Inst : Synth_Instance_Acc; Name : Node; Path : Node) return Valtyp
+   is
+      Cur_Inst : Synth_Instance_Acc;
+      Cur_Path : Node;
+   begin
+      Cur_Inst := Exec_Pathname_Concurrent_Region (Syn_Inst);
+      if Cur_Inst = null then
+         Error_Msg_Synth
+           (Syn_Inst, Path, "external name is not within a concurrent region");
+         return No_Valtyp;
+      end if;
+
+      --  LRM08 8.7 External names
+      --  Then, for each occurrence of a circumflex accent followed by a dot,
+      --  the innermost concurrent region, other than a block corresponding
+      --  to a component instantiation statement, containing the previously
+      --  identified declarative region replaces the previously identified
+      --  declaration region as the identified declarative region.
+      --  It is an error when evaluating the external name if, at any stage,
+      --  there is no such containing declarative region, of if the containing
+      --  declarative region is the declarative region of an uninstantiated
+      --  package.
+
+      Cur_Path := Path;
+      while Get_Kind (Cur_Path) = Iir_Kind_Relative_Pathname loop
+         Cur_Inst := Get_Instance_Parent (Cur_Inst);
+         Cur_Inst := Exec_Pathname_Concurrent_Region (Cur_Inst);
+
+         if Cur_Inst = null then
+            Error_Msg_Synth
+              (Syn_Inst, Path, "path already at top of hierarchy");
+            return No_Valtyp;
+         end if;
+
+         Cur_Path := Get_Pathname_Suffix (Cur_Path);
+      end loop;
+
+      return Synth_Pathname (Syn_Inst, Name, Cur_Inst, Cur_Path);
+   end Exec_Relative_Pathname;
+
+   function Exec_Package_Pathname
+     (Syn_Inst : Synth_Instance_Acc; Name : Node; Path : Node) return Valtyp
+   is
+      Lib_Id : constant Name_Id := Get_Identifier (Path);
+      Pkg_Path : constant Node := Get_Pathname_Suffix (Path);
+      Pkg_Id : constant Name_Id := Get_Identifier (Pkg_Path);
+      Cur_Inst : Synth_Instance_Acc;
+      It : Iterator_Top_Level_Type;
+      N : Node;
+   begin
+      It := Iterator_Top_Level_Init;
+      loop
+         Iterate_Top_Level (It, Cur_Inst);
+         exit when Cur_Inst = null;
+         N := Get_Source_Scope (Cur_Inst);
+         if Get_Identifier (N) = Pkg_Id
+           and then
+           Get_Identifier (Get_Library (Get_Design_File
+                                          (Get_Design_Unit (N)))) = Lib_Id
+         then
+            return Synth_Pathname
+              (Syn_Inst, Name, Cur_Inst, Get_Pathname_Suffix (Pkg_Path));
+         end if;
+      end loop;
+
+      Error_Msg_Synth
+        (Syn_Inst, Path, "cannot find package %i.%i in the design",
+         (+Path, +Pkg_Path));
+      return No_Valtyp;
+   end Exec_Package_Pathname;
+
+
+   function Exec_External_Name (Syn_Inst : Synth_Instance_Acc; Name : Node)
+                               return Valtyp
+   is
+      Path : Node;
+   begin
+      Path := Get_External_Pathname (Name);
+      case Iir_Kinds_Pathname (Get_Kind (Path)) is
+         when Iir_Kind_Absolute_Pathname =>
+            return Exec_Absolute_Pathname (Syn_Inst, Name, Path);
+         when Iir_Kind_Pathname_Element
+           | Iir_Kind_Relative_Pathname =>
+            return Exec_Relative_Pathname (Syn_Inst, Name, Path);
+         when Iir_Kind_Package_Pathname =>
+            return Exec_Package_Pathname (Syn_Inst, Name, Path);
+      end case;
+   end Exec_External_Name;
 
    --  Return True iff ID = S, case insensitive.
    function Match_Id (Id : Name_Id; M : Memory_Ptr; Len : Natural)
@@ -288,7 +780,7 @@ package body Elab.Vhdl_Expr is
 
       Dtype := Get_Subtype_Object (Syn_Inst, Etype);
       if not Is_Static (V.Val) then
-         Error_Msg_Elab (+Attr, "parameter of 'value must be static");
+         Error_Msg_Elab (Syn_Inst, Attr, "parameter of 'value must be static");
          return No_Valtyp;
       end if;
 
@@ -368,7 +860,7 @@ package body Elab.Vhdl_Expr is
       end if;
       Dtype := Get_Subtype_Object (Syn_Inst, Etype);
       if not Is_Static (V.Val) then
-         Error_Msg_Elab (+Attr, "parameter of 'image must be static");
+         Error_Msg_Elab (Syn_Inst, Attr, "parameter of 'image must be static");
          return No_Valtyp;
       end if;
 
@@ -392,10 +884,11 @@ package body Elab.Vhdl_Expr is
       return Create_Value_Memtyp (Res);
    end Exec_Instance_Name_Attribute;
 
-   procedure Check_Matching_Bounds (L, R : Type_Acc; Loc : Node) is
+   procedure Check_Matching_Bounds (Syn_Inst : Synth_Instance_Acc;
+                                    L, R : Type_Acc; Loc : Node) is
    begin
       if not Are_Types_Equal (L, R) then
-         Error_Msg_Elab (+Loc, "non matching bounds");
+         Error_Msg_Elab (Syn_Inst, Loc, "non matching bounds");
       end if;
    end Check_Matching_Bounds;
 
@@ -606,7 +1099,7 @@ package body Elab.Vhdl_Expr is
    function Exec_Path_Instance_Name_Attribute
      (Inst : Synth_Instance_Acc; Attr : Iir) return Memtyp
    is
-      use Grt.Vstrings;
+      use Grt.Rstrings;
       use Name_Table;
 
       Is_Instance : constant Boolean :=

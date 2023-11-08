@@ -71,6 +71,10 @@ package Vhdl.Canon is
    function Canon_Conditional_Variable_Assignment_Statement (Stmt : Iir)
                                                             return Iir;
 
+   --  Canon a selected variable assignment into a case statement.
+   function Canon_Selected_Variable_Assignment_Statement (Stmt : Iir)
+                                                         return Iir;
+
    --  Canon a conditional signal assignment into a conditional statement.
    function Canon_Conditional_Signal_Assignment_Statement (Stmt : Iir)
                                                           return Iir;
@@ -85,6 +89,10 @@ package Vhdl.Canon is
    --  Extract sensitivity of WAVEFORM.
    procedure Extract_Waveform_Sensitivity
      (Waveform : Iir; Sensitivity_List: Iir_List);
+
+   --  Extract sensititivity of a statement.
+   procedure Canon_Extract_Sensitivity_Statement
+     (Stmt : Iir; List : Iir_List);
 
    --  Likewise, but for all expressions appearing in statements CHAIN.
    procedure Canon_Extract_Sensitivity_Sequential_Statement_Chain

@@ -19,9 +19,7 @@
 with Types; use Types;
 with Tables;
 
-with Grt.Types; use Grt.Types;
 with Grt.Vhdl_Types; use Grt.Vhdl_Types;
-with Grt.Signals; use Grt.Signals;
 
 with Vhdl.Nodes; use Vhdl.Nodes;
 
@@ -72,7 +70,16 @@ package Simul.Vhdl_Elab is
 
    type Simultaneous_Index_Type is new Nat32;
 
+   --  Table of simple simultaneous statements.  Those are always considered.
    package Simultaneous_Table is new Tables
+     (Table_Component_Type => Simultaneous_Record,
+      Table_Index_Type => Simultaneous_Index_Type,
+      Table_Low_Bound => 1,
+      Table_Initial => 16);
+
+   --  Table of complex simultaneous statements.
+   --  The simple (or procedural) simultaneous statements are extracted.
+   package Complex_Simultaneous_Table is new Tables
      (Table_Component_Type => Simultaneous_Record,
       Table_Index_Type => Simultaneous_Index_Type,
       Table_Low_Bound => 1,
@@ -98,13 +105,8 @@ package Simul.Vhdl_Elab is
       --  Next connection for the actual.
       Actual_Link : Connect_Index_Type;
 
-      --  Whether it is a source for the actual or/and the actual.
-      --  The correct word is 'source'.
-      Drive_Formal : Boolean;
-      Drive_Actual : Boolean;
-
-      --  If true, the connection is fully collapsed: formal is the same
-      --  signal as actual.
+      --  If true, the connection is collapsed: formal is the same (or a
+      --  part) as the actual.
       Collapsed : Boolean;
 
       Assoc : Node;
@@ -138,37 +140,52 @@ package Simul.Vhdl_Elab is
    type Nbr_Sources_Array is array (Uns32 range <>) of Nbr_Sources_Type;
    type Nbr_Sources_Arr_Acc is access Nbr_Sources_Array;
 
-   type Signal_Entry (Kind : Mode_Signal_Type := Mode_Signal) is record
+   type Signal_Kind is (Signal_User,
+                        Signal_Quiet, Signal_Stable,
+                        Signal_Transaction,
+                        Signal_Delayed,
+                        Signal_Above,
+                        Signal_Guard,
+                        Signal_None);
+
+   type Signal_Entry (Kind : Signal_Kind := Signal_User) is record
       Decl : Iir;
       Inst : Synth_Instance_Acc;
       Typ : Type_Acc;
+      --  Initial value.
+      Val_Init : Memory_Ptr;
+      --  Current value.  In case of collapsed signal, this is the initial
+      --  value of the collapsed_by signal.
       Val : Memory_Ptr;
       Sig : Memory_Ptr;
 
       --  Processes sensitized by this signal.
       Sensitivity : Sensitivity_Index_Type;
 
-      --  This signal is identical to Collapsed_By, if set.
+      --  This signal is collapsed by Collapsed_By, if set.
+      --  Collapsed_Offs are the offset in Collapsed_By signal.
       Collapsed_By : Signal_Index_Type;
+      Collapsed_Offs : Value_Offsets;
 
       --  Connections.  Non-user signals can only be actuals.
       Connect : Connect_Index_Type;
 
+      Has_Active : Boolean;
+
       case Kind is
-         when Mode_Signal_User =>
+         when Signal_User =>
             Drivers : Driver_Index_Type;
             Disconnect : Disconnect_Index_Type;
             Nbr_Sources : Nbr_Sources_Arr_Acc;
-         when Mode_Quiet | Mode_Stable | Mode_Delayed
-           | Mode_Transaction =>
+         when Signal_Quiet | Signal_Stable | Signal_Delayed
+           | Signal_Transaction =>
             Time : Std_Time;
             Pfx : Sub_Signal_Type;
-         when Mode_Above =>
+         when Signal_Above =>
             null;
-         when Mode_Guard =>
+         when Signal_Guard =>
             null;
-         when Mode_Conv_In | Mode_Conv_Out | Mode_End =>
-            --  Unused.
+         when Signal_None =>
             null;
       end case;
    end record;
@@ -221,12 +238,13 @@ package Simul.Vhdl_Elab is
    No_Scalar_Quantity : constant Scalar_Quantity_Index := 0;
 
    type Quantity_Entry is record
+      --  Any quantity: free, branch, dot...
       Decl : Iir;
       Inst : Synth_Instance_Acc;
       Typ : Type_Acc;
       Val : Memory_Ptr;
       --  Index in the scalar table.
-      Idx : Scalar_Quantity_Index;
+      Sq_Idx : Scalar_Quantity_Index;
       --  For across quantity, we need the terminals to compute the value
       --  For a through quantity, we need the terminals to compute the contrib
    end record;
@@ -258,11 +276,4 @@ package Simul.Vhdl_Elab is
       Table_Index_Type => Terminal_Index_Type,
       Table_Low_Bound => No_Terminal_Index + 1,
       Table_Initial => 32);
-
-   --  Mapping.
-   type Iir_Kind_To_Kind_Signal_Type is
-     array (Iir_Signal_Kind) of Kind_Signal_Type;
-   Iir_Kind_To_Kind_Signal : constant Iir_Kind_To_Kind_Signal_Type :=
-     (Iir_Register_Kind  => Kind_Signal_Register,
-      Iir_Bus_Kind       => Kind_Signal_Bus);
 end Simul.Vhdl_Elab;

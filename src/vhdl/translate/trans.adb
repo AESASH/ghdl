@@ -14,6 +14,7 @@
 --  You should have received a copy of the GNU General Public License
 --  along with this program.  If not, see <gnu.org/licenses>.
 
+with Grt.Vstrings;
 with Name_Table; -- use Name_Table;
 with Vhdl.Nodes_Priv;
 with Tables;
@@ -180,9 +181,11 @@ package body Trans is
    end Subprgs;
 
    package body Chap10 is
+      use Grt.Vstrings;
+
       --  Identifiers.
       --  The following functions are helpers to create ortho identifiers.
-      Identifier_Buffer : String (1 .. 4096);
+      Identifier_Buffer : Vstring (1024);
       Identifier_Len    : Natural := 0;
       Identifier_Start  : Natural := 1;
 
@@ -716,6 +719,12 @@ package body Trans is
          Identifier_Local := Id;
       end Restore_Local_Identifier;
 
+      procedure Free_Identifier_Prefix is
+      begin
+         pragma Assert (Identifier_Len = 0);
+         Free (Identifier_Buffer);
+      end Free_Identifier_Prefix;
+
       --  Reset the identifier.
       procedure Reset_Identifier_Prefix is
       begin
@@ -728,11 +737,12 @@ package body Trans is
          pragma Assert (Mark.Len <= Identifier_Len);
          Identifier_Len := Mark.Len;
          Identifier_Local := Mark.Local_Id;
+         Truncate (Identifier_Buffer, Identifier_Len);
       end Pop_Identifier_Prefix;
 
       procedure Add_String (Len : in out Natural; Str : String) is
       begin
-         Identifier_Buffer (Len + 1 .. Len + Str'Length) := Str;
+         Append (Identifier_Buffer, Str);
          Len := Len + Str'Length;
       end Add_String;
 
@@ -915,18 +925,21 @@ package body Trans is
       function Create_Id (Id : Name_Id; Str : String; Is_Local : Boolean)
                           return O_Ident
       is
-         L : Natural;
+         L, S : Natural;
+         Res : O_Ident;
       begin
          L := Identifier_Len;
          Add_Identifier (L, Id);
          Add_String (L, Str);
          --Identifier_Buffer (L + Str'Length + 1) := Nul;
          if Is_Local then
-            return Get_Identifier
-              (Identifier_Buffer (Identifier_Start .. L));
+            S := Identifier_Start;
          else
-            return Get_Identifier (Identifier_Buffer (1 .. L));
+            S := 1;
          end if;
+         Res := Get_Identifier (Get_C_String (Identifier_Buffer) (S .. L));
+         Truncate (Identifier_Buffer, Identifier_Len);
+         return Res;
       end Create_Id;
 
       function Create_Identifier (Id : Name_Id; Str : String := "")
@@ -944,10 +957,10 @@ package body Trans is
       end Create_Identifier;
 
       function Create_Identifier
-        (Id : Iir; Val : Iir_Int32; Str : String := "")
-         return O_Ident
+        (Id : Iir; Val : Iir_Int32; Str : String := "") return O_Ident
       is
          Len : Natural;
+         Res : O_Ident;
       begin
          Len := Identifier_Len;
          Add_Identifier (Len, Get_Identifier (Id));
@@ -957,23 +970,28 @@ package body Trans is
             Add_Nat (Len, Natural (Val));
          end if;
          Add_String (Len, Str);
-         return Get_Identifier (Identifier_Buffer (1 .. Len));
+         Res := Get_Identifier (Get_C_String (Identifier_Buffer) (1 .. Len));
+         Truncate (Identifier_Buffer, Identifier_Len);
+         return Res;
       end Create_Identifier;
 
-      function Create_Identifier (Str : String)
-                                  return O_Ident
+      function Create_Identifier (Str : String) return O_Ident
       is
          Len : Natural;
+         Res : O_Ident;
       begin
          Len := Identifier_Len;
          Add_String (Len, Str);
-         return Get_Identifier (Identifier_Buffer (1 .. Len));
+         Res := Get_Identifier (Get_C_String (Identifier_Buffer) (1 .. Len));
+         Truncate (Identifier_Buffer, Identifier_Len);
+         return Res;
       end Create_Identifier;
 
       function Create_Identifier return O_Ident
       is
       begin
-         return Get_Identifier (Identifier_Buffer (1 .. Identifier_Len - 2));
+         return Get_Identifier
+            (Get_C_String (Identifier_Buffer) (1 .. Identifier_Len - 2));
       end Create_Identifier;
 
       function Create_Elab_Identifier (Kind : Elab_Kind) return O_Ident is
@@ -990,17 +1008,19 @@ package body Trans is
                                                   return Var_Ident_Type
       is
          Start : Natural;
+         Res : O_Ident;
       begin
          if Is_Local_Scope then
             Start := Identifier_Start;
          else
             Start := 1;
          end if;
-         return (Id => Get_Identifier (Identifier_Buffer (Start .. L)));
+         Res := Get_Identifier (Get_C_String (Identifier_Buffer) (Start .. L));
+         Truncate (Identifier_Buffer, Identifier_Len);
+         return (Id => Res);
       end Create_Var_Identifier_From_Buffer;
 
-      function Create_Var_Identifier (Id : Iir)
-                                      return Var_Ident_Type
+      function Create_Var_Identifier (Id : Iir) return Var_Ident_Type
       is
          L : Natural := Identifier_Len;
       begin
@@ -1008,8 +1028,7 @@ package body Trans is
          return Create_Var_Identifier_From_Buffer (L);
       end Create_Var_Identifier;
 
-      function Create_Var_Identifier (Id : String)
-                                      return Var_Ident_Type
+      function Create_Var_Identifier (Id : String) return Var_Ident_Type
       is
          L : Natural := Identifier_Len;
       begin

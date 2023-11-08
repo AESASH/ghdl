@@ -592,7 +592,8 @@ package body Synth.Vhdl_Insts is
       Build => Build,
       Equal => Equal);
 
-   function Is_Arch_Black_Box (Arch : Node) return Boolean
+   function Is_Arch_Black_Box (Inst : Synth_Instance_Acc; Arch : Node)
+                              return Boolean
    is
       use Vhdl.Std_Package;
       use Elab.Vhdl_Errors;
@@ -616,7 +617,7 @@ package body Synth.Vhdl_Insts is
                when Std_Names.Name_Syn_Black_Box =>
                   if Get_Type (Attr_Decl) /= Boolean_Type_Definition then
                      Error_Msg_Elab
-                       (+Attr_Decl,
+                       (Inst, Attr_Decl,
                         "type of syn_black_box attribute must be boolean");
                      return True;
                   end if;
@@ -625,7 +626,7 @@ package body Synth.Vhdl_Insts is
                      --  Do we really require the value to be static if the
                      --  architecture has been elaborated ?
                      Error_Msg_Elab
-                       (+Spec, "value of syn_black_box must be static");
+                       (Inst, Spec, "value of syn_black_box must be static");
                      return True;
                   end if;
                   if Vhdl.Evaluation.Eval_Pos (Val) /= 0 then
@@ -642,7 +643,7 @@ package body Synth.Vhdl_Insts is
 
    function Interning_Get (Param : Inst_Params) return Inst_Object is
    begin
-      if Is_Arch_Black_Box (Param.Arch) then
+      if Is_Arch_Black_Box (Param.Syn_Inst, Param.Arch) then
          return Insts_Interning.Get ((Decl => Param.Decl,
                                       Arch => Null_Node,
                                       Config => Null_Node,
@@ -1471,7 +1472,6 @@ package body Synth.Vhdl_Insts is
            and then not Get_Elab_Flag (Dep)
          then
             Set_Elab_Flag (Dep, True);
-            Synth_Dependencies (Parent_Inst, Dep);
             Dep_Unit := Get_Library_Unit (Dep);
             case Iir_Kinds_Library_Unit (Get_Kind (Dep_Unit)) is
                when Iir_Kind_Entity_Declaration =>
@@ -1485,23 +1485,26 @@ package body Synth.Vhdl_Insts is
                      Bod : constant Node := Get_Package_Body (Dep_Unit);
                      Bod_Unit : Node;
                   begin
+                     Synth_Dependencies (Parent_Inst, Dep);
                      Synth_Concurrent_Package_Declaration
-                       (Parent_Inst, Dep_Unit);
+                       (Parent_Inst, Dep_Unit, True);
                      --  Do not try to elaborate math_real body: there are
-                     --  functions with loop.  Currently, try create signals,
-                     --  which is not possible during package elaboration.
+                     --  functions with loop.  Currently, it tries to create
+                     --  signals, which is not possible during package
+                     --  elaboration.
                      if Bod /= Null_Node
                        and then Dep_Unit /= Vhdl.Ieee.Math_Real.Math_Real_Pkg
                      then
                         Bod_Unit := Get_Design_Unit (Bod);
                         Synth_Dependencies (Parent_Inst, Bod_Unit);
                         Synth_Concurrent_Package_Body
-                          (Parent_Inst, Dep_Unit, Bod);
+                          (Parent_Inst, Dep_Unit, Bod, True);
                      end if;
                   end;
                when Iir_Kind_Package_Instantiation_Declaration =>
+                  Synth_Dependencies (Parent_Inst, Dep);
                   Synth_Concurrent_Package_Instantiation
-                    (Parent_Inst, Dep_Unit);
+                    (Parent_Inst, Dep_Unit, True);
                when Iir_Kind_Package_Body =>
                   null;
                when Iir_Kind_Architecture_Body =>
@@ -1549,7 +1552,7 @@ package body Synth.Vhdl_Insts is
       Insts_Interning.Init;
 
       if Flags.Flag_Debug_Init then
-         Elab.Debugger.Debug_Init (Arch);
+         Elab.Debugger.Debug_Elab (Syn_Inst);
       end if;
 
       pragma Assert (Is_Expr_Pool_Empty);
@@ -1672,7 +1675,8 @@ package body Synth.Vhdl_Insts is
                                     Arch : Node) is
    begin
       --  Entity
-      Synth_Concurrent_Declarations (Syn_Inst, Get_Declaration_Chain (Entity));
+      Synth_Concurrent_Declarations
+        (Syn_Inst, Get_Declaration_Chain (Entity), False);
       if not Is_Error (Syn_Inst) then
          Synth_Concurrent_Statements
            (Syn_Inst, Get_Concurrent_Statement_Chain (Entity));
@@ -1690,7 +1694,7 @@ package body Synth.Vhdl_Insts is
       Instance_Pool := Process_Pool'Access;
       if not Is_Error (Syn_Inst) then
          Synth_Concurrent_Declarations
-           (Syn_Inst, Get_Declaration_Chain (Arch));
+           (Syn_Inst, Get_Declaration_Chain (Arch), False);
       end if;
 
       pragma Assert (Is_Expr_Pool_Empty);

@@ -456,15 +456,17 @@ package body Vhdl.Utils is
          when Iir_Kind_Object_Alias_Declaration =>
             return Name;
 
+         --  LRM08 8.7 External names
+         --  An external name denotes an object [...]
+         when Iir_Kinds_External_Name =>
+            return Name;
+
          when Iir_Kind_Simple_Name
            | Iir_Kind_Selected_Name =>
             --  LRM08 8 Names
             --  Names can denote declared entities [...]
             --  GHDL: in particular, names can denote objects.
             return Name_To_Object (Get_Named_Entity (Name));
-
-         when Iir_Kinds_External_Name =>
-            return Name;
 
          --  AMS-LRM17 6.4 Objects
          --  An implicit signal defined by any of the predefined attributes
@@ -527,7 +529,8 @@ package body Vhdl.Utils is
          when Iir_Kind_Signal_Declaration
            | Iir_Kind_Interface_Signal_Declaration
            | Iir_Kind_Guard_Signal_Declaration
-           | Iir_Kinds_Signal_Attribute =>
+           | Iir_Kinds_Signal_Attribute
+           | Iir_Kind_External_Signal_Name =>
             return True;
          when Iir_Kind_Object_Alias_Declaration =>
             --  Must have been handled by Get_Object_Prefix.
@@ -1347,6 +1350,8 @@ package body Vhdl.Utils is
            | Iir_Kind_Element_Attribute
            | Iir_Kind_Subtype_Attribute =>
             return False;
+         when Iir_Kind_Foreign_Vector_Type_Definition =>
+            return True;
          when others =>
             Error_Kind ("is_proper_subtype_indication", Def);
       end case;
@@ -1510,8 +1515,17 @@ package body Vhdl.Utils is
 
    function Is_Second_Subprogram_Specification (Spec : Iir) return Boolean
    is
-      Bod : constant Iir := Get_Chain (Spec);
+      Bod : Iir;
    begin
+      Bod := Get_Chain (Spec);
+      if Bod /= Null_Iir
+        and then Get_Kind (Bod) = Iir_Kind_Attribute_Implicit_Declaration
+      then
+         --  Maybe implicit declarations have been inserted before the
+         --  body.
+         Bod := Get_Chain (Bod);
+      end if;
+
       --  FIXME: don't directly use Subprogram_Body as it is not yet correctly
       --  set during instantiation.
       return Get_Has_Body (Spec)
@@ -2142,6 +2156,110 @@ package body Vhdl.Utils is
             Error_Kind ("get_file_signature", Def);
       end case;
    end Get_File_Signature;
+
+   function Get_Converse_Mode (Mode : Iir_Mode) return Iir_Mode is
+   begin
+      case Mode is
+         when Iir_In_Mode =>
+            return Iir_Out_Mode;
+         when Iir_Out_Mode
+           | Iir_Buffer_Mode =>
+            return Iir_In_Mode;
+         when Iir_Inout_Mode =>
+            return Iir_Inout_Mode;
+         when Iir_Linkage_Mode
+           | Iir_Unknown_Mode =>
+            --  Not supported
+            return Mode;
+      end case;
+   end Get_Converse_Mode;
+
+   procedure Extract_Mode_View_Name
+     (Name : Iir; View : out Iir; Reversed : out Boolean)
+   is
+      Pfx : Iir;
+   begin
+      Pfx := Name;
+      Reversed := False;
+
+      loop
+         case Get_Kind (Pfx) is
+            when Iir_Kinds_Denoting_Name =>
+               Pfx := Get_Named_Entity (Pfx);
+            when Iir_Kind_Mode_View_Declaration
+              | Iir_Kind_Simple_Mode_View_Element =>
+               View := Pfx;
+               exit;
+            when Iir_Kind_Converse_Attribute =>
+               Reversed := not Reversed;
+               Pfx := Get_Prefix (Pfx);
+            when Iir_Kind_Record_Mode_View_Indication
+              | Iir_Kind_Array_Mode_View_Indication =>
+               Pfx := Get_Name (Pfx);
+            when others =>
+               Error_Kind ("extract_mode_view_name", Pfx);
+         end case;
+      end loop;
+   end Extract_Mode_View_Name;
+
+   procedure Update_Mode_View_By_Pos (Sub_View : out Iir;
+                                      Sub_Reversed : out Boolean;
+                                      View : Iir;
+                                      Reversed : Boolean;
+                                      Pos : Natural)
+   is
+      Def_List : constant Iir_Flist := Get_Elements_Definition_List (View);
+      El_Name : constant Iir := Get_Nth_Element (Def_List, Pos);
+      Reversed1 : Boolean;
+   begin
+      case Iir_Kinds_Mode_View_Element_Definition (Get_Kind (El_Name)) is
+         when Iir_Kind_Simple_Mode_View_Element =>
+            Sub_View := El_Name;
+            Sub_Reversed := Reversed;
+         when Iir_Kind_Array_Mode_View_Element
+           | Iir_Kind_Record_Mode_View_Element =>
+            Extract_Mode_View_Name
+              (Get_Mode_View_Name (El_Name), Sub_View, Reversed1);
+            Sub_Reversed := Reversed xor Reversed1;
+      end case;
+   end Update_Mode_View_By_Pos;
+
+   procedure Update_Mode_View_Selected_Name
+     (View : in out Iir; Reversed : in out Boolean; El : Iir)
+   is
+      pragma Assert (Get_Kind (View) = Iir_Kind_Mode_View_Declaration);
+      Pos : constant Natural := Natural (Get_Element_Position (El));
+      Sub_View : Iir;
+      Sub_Reversed : Boolean;
+   begin
+      Update_Mode_View_By_Pos (Sub_View, Sub_Reversed, View, Reversed, Pos);
+      View := Sub_View;
+      Reversed := Sub_Reversed;
+   end Update_Mode_View_Selected_Name;
+
+   procedure Get_Mode_View_From_Name
+     (Name : Iir; View : out Iir; Reversed : out Boolean) is
+   begin
+      case Get_Kind (Name) is
+         when Iir_Kinds_Denoting_Name =>
+            Get_Mode_View_From_Name (Get_Named_Entity (Name), View, Reversed);
+         when Iir_Kind_Interface_View_Declaration =>
+            Extract_Mode_View_Name
+              (Get_Mode_View_Indication (Name), View, Reversed);
+         when Iir_Kind_Selected_Element =>
+            Get_Mode_View_From_Name
+              (Get_Prefix (Name), View, Reversed);
+            if Get_Kind (View) = Iir_Kind_Simple_Mode_View_Element then
+               return;
+            end if;
+            pragma Assert (Get_Kind (View) = Iir_Kind_Mode_View_Declaration);
+
+            Update_Mode_View_Selected_Name
+              (View, Reversed, Get_Named_Entity (Name));
+         when others =>
+            Error_Kind ("get_mode_view_from_name", Name);
+      end case;
+   end Get_Mode_View_From_Name;
 
    function Get_Source_Identifier (Decl : Iir) return Name_Id
    is

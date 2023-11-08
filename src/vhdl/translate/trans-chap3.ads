@@ -23,6 +23,10 @@ package Trans.Chap3 is
      (Decl : Iir; With_Vars : Boolean := True);
    procedure Elab_Object_Subtype_Indication (Decl : Iir);
 
+   --  Likewise, but for external names.
+   procedure Translate_External_Name_Subtype_Indication (Name : Iir);
+   procedure Elab_External_Name_Subtype_Indication (Name : Iir);
+
    --  Translate the subtype of a literal.
    --  This can be done not at declaration time, ie no variables are created
    --  for this subtype.
@@ -247,9 +251,6 @@ package Trans.Chap3 is
    --  From unbounded array bounds B, get the layout of the unbounded element.
    function Array_Bounds_To_Element_Layout (B : Mnode; Arr_Type : Iir)
                                            return Mnode;
-
-   --  Deallocate OBJ.
-   procedure Gen_Deallocate (Obj : O_Enode);
 
    --  Performs deallocation of PARAM (the parameter of a deallocate call).
    procedure Translate_Object_Deallocation (Param : Iir);

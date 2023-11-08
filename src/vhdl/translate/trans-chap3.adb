@@ -753,14 +753,19 @@ package body Trans.Chap3 is
                      --  for it.
                      null;
                   elsif El_Tinfo.S.Subtype_Owner /= Tinfo then
-                     --  The element is not owned by this subtype, so it has
-                     --  its own layout variable that must have been set.
-                     --  Just copy the layout.
-                     Gen_Memcpy
-                       (M2Addr (Array_Bounds_To_Element_Layout (Targ, Def)),
-                        M2Addr (Get_Composite_Type_Layout (El_Tinfo)),
-                        New_Lit (New_Sizeof (El_Tinfo.B.Layout_Type,
-                                             Ghdl_Index_Type)));
+                     --  Do not try to copy layout if there are none.
+                     if El_Tinfo.S.Subtype_Owner /= null
+                       or else El_Tinfo.S.Composite_Layout /= Null_Var
+                     then
+                        --  The element is not owned by this subtype, so it has
+                        --  its own layout variable that must have been set.
+                        --  Just copy the layout.
+                        Gen_Memcpy
+                          (M2Addr (Array_Bounds_To_Element_Layout (Targ, Def)),
+                           M2Addr (Get_Composite_Type_Layout (El_Tinfo)),
+                           New_Lit (New_Sizeof (El_Tinfo.B.Layout_Type,
+                                                Ghdl_Index_Type)));
+                     end if;
                   else
                      --  New constraints.
                      Elab_Composite_Subtype_Layout
@@ -1336,6 +1341,9 @@ package body Trans.Chap3 is
       end loop;
 
       --  Create the bounds type
+      --  TODO: separate type bounds (for complex elements) and subtype bounds
+      --  (for unbounded elements).
+      --  TODO: only for unbounded or complex records.
       Info.B.Bounds_Type := O_Tnode_Null;
       Start_Record_Type (El_List);
       New_Record_Field (El_List, Info.B.Layout_Size,
@@ -2742,7 +2750,9 @@ package body Trans.Chap3 is
       if Get_Kind (Decl) = Iir_Kind_Constant_Declaration then
          Ind_Type := Get_Type_Of_Subtype_Indication (Ind);
          Def := Get_Type (Decl);
-         if Def /= Ind_Type then
+         if Def /= Ind_Type
+           and then Is_Anonymous_Type_Definition (Def)
+         then
             Push_Identifier_Prefix (Mark2, "OTD");
             Chap3.Translate_Subtype_Definition (Def, With_Vars);
             Pop_Identifier_Prefix (Mark2);
@@ -2773,11 +2783,38 @@ package body Trans.Chap3 is
       if Get_Kind (Decl) = Iir_Kind_Constant_Declaration then
          Ind_Type := Get_Type_Of_Subtype_Indication (Ind);
          Def := Get_Type (Decl);
-         if Def /= Ind_Type then
+         if Def /= Ind_Type
+           and then Is_Anonymous_Type_Definition (Def)
+         then
             Elab_Subtype_Definition (Def);
          end if;
       end if;
    end Elab_Object_Subtype_Indication;
+
+   procedure Translate_External_Name_Subtype_Indication (Name : Iir)
+   is
+      Ind : constant Iir := Get_Subtype_Indication (Name);
+      Ind_Type : Iir;
+      Mark2 : Id_Mark_Type;
+   begin
+      if Is_Proper_Subtype_Indication (Ind) then
+         Ind_Type := Get_Type_Of_Subtype_Indication (Ind);
+         Push_Identifier_Prefix (Mark2, "OT");
+         Chap3.Translate_Subtype_Definition (Ind_Type, True);
+         Pop_Identifier_Prefix (Mark2);
+      end if;
+   end Translate_External_Name_Subtype_Indication;
+
+   procedure Elab_External_Name_Subtype_Indication (Name : Iir)
+   is
+      Ind : constant Iir := Get_Subtype_Indication (Name);
+      Ind_Type : Iir;
+   begin
+      if Is_Proper_Subtype_Indication (Ind) then
+         Ind_Type := Get_Type_Of_Subtype_Indication (Ind);
+         Chap3.Elab_Subtype_Definition (Ind_Type);
+      end if;
+   end Elab_External_Name_Subtype_Indication;
 
    procedure Elab_Type_Declaration (Decl : Iir) is
    begin
@@ -3450,20 +3487,12 @@ package body Trans.Chap3 is
       end if;
    end Translate_Object_Allocation;
 
-   procedure Gen_Deallocate (Obj : O_Enode)
-   is
-      Assocs : O_Assoc_List;
-   begin
-      Start_Association (Assocs, Ghdl_Deallocate);
-      New_Association (Assocs, New_Convert_Ov (Obj, Ghdl_Ptr_Type));
-      New_Procedure_Call (Assocs);
-   end Gen_Deallocate;
-
    --  Performs deallocation of PARAM (the parameter of a deallocate call).
    procedure Translate_Object_Deallocation (Param : Iir)
    is
       Param_Type : constant Iir := Get_Type (Param);
       Info       : constant Type_Info_Acc := Get_Info (Param_Type);
+      Assocs : O_Assoc_List;
       Val        : Mnode;
    begin
       --  Compute parameter
@@ -3471,7 +3500,10 @@ package body Trans.Chap3 is
       Stabilize (Val);
 
       --  Call deallocator.
-      Gen_Deallocate (New_Value (M2Lv (Val)));
+      Start_Association (Assocs, Ghdl_Deallocate);
+      New_Association (Assocs, New_Convert_Ov (New_Value (M2Lv (Val)),
+                                               Ghdl_Ptr_Type));
+      New_Procedure_Call (Assocs);
 
       --  Set the value to null.
       New_Assign_Stmt

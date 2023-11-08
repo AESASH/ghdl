@@ -38,6 +38,10 @@ package Synth.Errors is
    procedure Error_Msg_Netlist (Loc : Location_Type;
                                 Msg : String;
                                 Args : Earg_Arr := No_Eargs);
+   procedure Warning_Msg_Netlist (Warnid : Msgid_Warnings;
+                                  Loc : Location_Type;
+                                  Msg : String;
+                                  Args : Earg_Arr := No_Eargs);
 
    procedure Warning_Msg_Synth (Warnid : Msgid_Warnings;
                                 Loc : Location_Type;
@@ -54,7 +58,4 @@ package Synth.Errors is
                              Msg : String;
                              Args : Earg_Arr := No_Eargs);
 
-   type Handler_Access is access procedure (Inst : Synth_Instance_Acc;
-                                            Loc : Node);
-   Debug_Handler : Handler_Access;
 end Synth.Errors;

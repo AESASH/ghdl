@@ -109,6 +109,8 @@ package body Vhdl.Std_Package is
       Create_Known_Iir (Iir_Kind_Wildcard_Type_Definition,
                         Wildcard_Any_Integer_Type);
       Create_Known_Iir (Iir_Kind_Wildcard_Type_Definition,
+                        Wildcard_Any_Discrete_Type);
+      Create_Known_Iir (Iir_Kind_Wildcard_Type_Definition,
                         Wildcard_Psl_Bit_Type);
       Create_Known_Iir (Iir_Kind_Wildcard_Type_Definition,
                         Wildcard_Psl_Bitvector_Type);
@@ -1392,6 +1394,7 @@ package body Vhdl.Std_Package is
       Create_Wildcard_Type (Wildcard_Any_String_Type, "any string type");
       Create_Wildcard_Type (Wildcard_Any_Access_Type, "any access type");
       Create_Wildcard_Type (Wildcard_Any_Integer_Type, "any integer type");
+      Create_Wildcard_Type (Wildcard_Any_Discrete_Type, "any discrete type");
       Create_Wildcard_Type (Wildcard_Psl_Bit_Type, "a PSL bit type");
       Create_Wildcard_Type (Wildcard_Psl_Bitvector_Type,
                             "a PSL bitvector type");

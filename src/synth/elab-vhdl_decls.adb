@@ -24,6 +24,7 @@ with Elab.Vhdl_Types; use Elab.Vhdl_Types;
 with Elab.Vhdl_Files;
 with Elab.Vhdl_Expr; use Elab.Vhdl_Expr;
 with Elab.Vhdl_Insts;
+with Elab.Vhdl_Errors;
 
 with Synth.Vhdl_Expr; use Synth.Vhdl_Expr;
 with Synth.Vhdl_Stmts; use Synth.Vhdl_Stmts;
@@ -43,7 +44,9 @@ package body Elab.Vhdl_Decls is
 
       Inter := Get_Interface_Declaration_Chain (Subprg);
       while Inter /= Null_Node loop
-         Typ := Elab_Declaration_Type (Syn_Inst, Inter);
+         if not Get_Is_Ref (Inter) then
+            Elab_Declaration_Type (Syn_Inst, Inter);
+         end if;
          Inter := Get_Chain (Inter);
       end loop;
       pragma Unreferenced (Typ);
@@ -53,21 +56,33 @@ package body Elab.Vhdl_Decls is
                             Decl : Node;
                             Typ : Type_Acc)
    is
-      Def : constant Iir := Get_Default_Value (Decl);
+      Def : Iir;
       Expr_Mark : Mark_Type;
       Init : Valtyp;
    begin
       pragma Assert (Typ.Is_Global);
 
-      if Is_Valid (Def) then
-         Mark_Expr_Pool (Expr_Mark);
-         Init := Synth_Expression_With_Type (Syn_Inst, Def, Typ);
-         Init := Exec_Subtype_Conversion (Init, Typ, False, Decl);
-         Init := Unshare (Init, Instance_Pool);
-         Release_Expr_Pool (Expr_Mark);
-      else
+      if Get_Kind (Decl) = Iir_Kind_Interface_View_Declaration then
          Init := No_Valtyp;
+      else
+         --  According to LRM08 14.4.2.5 Object declarations
+         --  b) If the object declaration includes an explicit initialization
+         --     expression, then the initial value of the object is obtained
+         --     by evaluating the expression.
+         --  GHDL: so the default value is evaluated even if not needed
+         --    (like for an associated IN port).
+         Def := Get_Default_Value (Decl);
+         if Is_Valid (Def) then
+            Mark_Expr_Pool (Expr_Mark);
+            Init := Synth_Expression_With_Type (Syn_Inst, Def, Typ);
+            Init := Exec_Subtype_Conversion (Init, Typ, False, Decl);
+            Init := Unshare (Init, Instance_Pool);
+            Release_Expr_Pool (Expr_Mark);
+         else
+            Init := No_Valtyp;
+         end if;
       end if;
+
       Create_Signal (Syn_Inst, Decl, Typ, Init.Val);
    end Create_Signal;
 
@@ -91,6 +106,12 @@ package body Elab.Vhdl_Decls is
       Obj_Typ : Type_Acc;
    begin
       Obj_Typ := Elab_Declaration_Type (Syn_Inst, Decl);
+      if Obj_Typ = null then
+         Elab.Vhdl_Errors.Error_Msg_Elab
+           (Syn_Inst, Decl,
+            "type of variable %i referenced before its elaboration", +Decl);
+         raise Elab.Vhdl_Errors.Elaboration_Error;
+      end if;
 
       Mark_Expr_Pool (Marker);
       if Is_Valid (Def) then
@@ -141,7 +162,7 @@ package body Elab.Vhdl_Decls is
       Res : Valtyp;
    begin
       Obj_Typ := Elab_Declaration_Type (Syn_Inst, Decl);
-      Res := Create_Value_Quantity (Obj_Typ, No_Quantity_Index);
+      Res := Create_Value_Quantity (Obj_Typ, No_Quantity_Index, Instance_Pool);
       Create_Object (Syn_Inst, Decl, Res);
    end Elab_Free_Quantity_Declaration;
 
@@ -161,7 +182,7 @@ package body Elab.Vhdl_Decls is
       Res : Valtyp;
    begin
       Obj_Typ := Get_Subtype_Object (Syn_Inst, Get_Type (Decl));
-      Res := Create_Value_Quantity (Obj_Typ, No_Quantity_Index);
+      Res := Create_Value_Quantity (Obj_Typ, No_Quantity_Index, Instance_Pool);
       Create_Object (Syn_Inst, Decl, Res);
    end Elab_Implicit_Quantity_Declaration;
 
@@ -170,7 +191,7 @@ package body Elab.Vhdl_Decls is
    is
       Res : Valtyp;
    begin
-      Res := Create_Value_Terminal (null, No_Terminal_Index);
+      Res := Create_Value_Terminal (null, No_Terminal_Index, Instance_Pool);
       Create_Object (Syn_Inst, Decl, Res);
    end Elab_Terminal_Declaration;
 
@@ -231,6 +252,7 @@ package body Elab.Vhdl_Decls is
    procedure Elab_Object_Alias_Declaration
      (Syn_Inst : Synth_Instance_Acc; Decl : Node)
    is
+      Name : constant Node := Get_Name (Decl);
       Marker : Mark_Type;
       Off : Value_Offsets;
       Res : Valtyp;
@@ -246,17 +268,40 @@ package body Elab.Vhdl_Decls is
          Obj_Typ := null;
       end if;
 
-      Synth_Assignment_Prefix (Syn_Inst, Get_Name (Decl), Base, Typ, Off);
-      Typ := Unshare (Typ, Instance_Pool);
-      Res := Create_Value_Alias (Base, Off, Typ, Expr_Pool'Access);
-      if Obj_Typ /= null and then Obj_Typ.Kind not in Type_Scalars then
-         --  Reshape bounds.
-         Res := Exec_Subtype_Conversion (Res, Obj_Typ, True, Decl);
+      if Get_Kind (Name) in Iir_Kinds_External_Name then
+         Base := Exec_External_Name (Syn_Inst, Name);
+         Typ := Base.Typ;
+         Off := No_Value_Offsets;
+      else
+         Synth_Assignment_Prefix (Syn_Inst, Name, Base, Typ, Off);
       end if;
-      Res := Unshare (Res, Instance_Pool);
+      if Base /= No_Valtyp then
+         --  In case of error (invalid name or invalid external name).
+         Res := Create_Value_Alias (Base, Off, Typ, Expr_Pool'Access);
+         if Obj_Typ /= null and then Obj_Typ.Kind not in Type_Scalars then
+            --  Reshape bounds.
+            Res := Exec_Subtype_Conversion (Res, Obj_Typ, True, Decl);
+         end if;
+         Res.Typ := Unshare (Res.Typ, Instance_Pool);
+         Res := Unshare (Res, Instance_Pool);
+      end if;
       Create_Object (Syn_Inst, Decl, Res);
       Release_Expr_Pool (Marker);
    end Elab_Object_Alias_Declaration;
+
+   procedure Elab_External_Name (Syn_Inst : Synth_Instance_Acc; Decl : Node)
+   is
+      Obj_Typ : Type_Acc;
+      Res : Valtyp;
+   begin
+      Obj_Typ := Elab_Declaration_Type (Syn_Inst, Decl);
+
+      Res := Create_Value_Alias
+        (No_Valtyp, No_Value_Offsets, Obj_Typ, Instance_Pool);
+
+      --  For elaboration: Base, Offset and reshaped bounds.
+      Create_Object (Syn_Inst, Decl, Res);
+   end Elab_External_Name;
 
    procedure Elab_Declaration (Syn_Inst : Synth_Instance_Acc;
                                Decl : Node;
@@ -308,13 +353,9 @@ package body Elab.Vhdl_Decls is
             Elab_Anonymous_Type_Definition
               (Syn_Inst, Get_Type_Definition (Decl),
                Get_Subtype_Definition (Decl));
-         when Iir_Kind_Subtype_Declaration =>
-            declare
-               T : Type_Acc;
-            begin
-               T := Elab_Declaration_Type (Syn_Inst, Decl);
-               pragma Unreferenced (T);
-            end;
+         when Iir_Kind_Subtype_Declaration
+           | Iir_Kind_Mode_View_Declaration =>
+            Elab_Declaration_Type (Syn_Inst, Decl);
          when Iir_Kind_Component_Declaration =>
             null;
          when Iir_Kind_File_Declaration =>
@@ -368,6 +409,9 @@ package body Elab.Vhdl_Decls is
             Elab_Implicit_Signal_Declaration (Syn_Inst, Decl);
          when Iir_Kind_Disconnection_Specification =>
             null;
+
+         when Iir_Kinds_External_Name =>
+            Elab_External_Name (Syn_Inst, Decl);
 
          when Iir_Kind_Group_Template_Declaration
            | Iir_Kind_Group_Declaration =>

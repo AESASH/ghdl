@@ -99,9 +99,6 @@ package body Vhdl.Sem_Decls is
          Set_Attr_Chain (Current_Signals_Region.Last_Attribute, Attr);
       end if;
       Current_Signals_Region.Last_Attribute := Attr;
-
-      Set_Attribute_Implicit_Declaration
-        (Attr, Current_Signals_Region.Implicit_Decl);
    end Add_Implicit_Declaration;
 
    --  Insert pending implicit declarations after the last analyzed LAST_DECL,
@@ -1271,7 +1268,8 @@ package body Vhdl.Sem_Decls is
                   then
                      Warning_Msg_Sem
                        (Warnid_Elaboration, +Decl,
-                        "declaration of a protected type before the body");
+                        "declaration of a protected object before "
+                          & "the protected body");
                   end if;
                end;
             end if;
@@ -1956,7 +1954,8 @@ package body Vhdl.Sem_Decls is
          when Iir_Kinds_Object_Declaration =>
             raise Internal_Error;
          when Iir_Kind_Attribute_Declaration
-           | Iir_Kind_Component_Declaration =>
+           | Iir_Kind_Component_Declaration
+           | Iir_Kind_Package_Declaration =>
             null;
          when Iir_Kind_Terminal_Declaration =>
             --  TODO: should have Sem_Terminal_Alias_Declaration.
@@ -2015,6 +2014,10 @@ package body Vhdl.Sem_Decls is
    begin
       Xref_Decl (Alias);
 
+      --  Add the alias name now (so that visbility is checked) even if the
+      --  node could change.
+      Sem_Scopes.Add_Alias_Name (Alias);
+
       Name := Get_Name (Alias);
       case Get_Kind (Name) is
          when Iir_Kind_Signature =>
@@ -2035,6 +2038,21 @@ package body Vhdl.Sem_Decls is
          when Iir_Kind_Error =>
             pragma Assert (Flags.Flag_Force_Analysis);
             return Alias;
+         when Iir_Kinds_External_Name =>
+            declare
+               Implicit_Decl : Boolean;
+            begin
+               if Get_Kind (Get_Parent (Alias)) in Iir_Kinds_Subprogram_Body
+               then
+                  --  Create an implicit declaration for the external name,
+                  --  so that it will be elaborated at start.
+                  Implicit_Decl := True;
+               else
+                  Implicit_Decl := False;
+               end if;
+               Sem_External_Name (Name, not Implicit_Decl);
+               Sig := Null_Iir;
+            end;
          when others =>
             Sem_Name (Name);
             Sig := Null_Iir;
@@ -2066,8 +2084,7 @@ package body Vhdl.Sem_Decls is
 
       if Is_Object_Name (N_Entity) then
          --  Object alias declaration.
-
-         Sem_Scopes.Add_Name (Alias);
+         Sem_Scopes.Replace_Alias_Name (Alias, Alias);
          Name_Visible (Alias);
 
          if Sig /= Null_Iir then
@@ -2097,7 +2114,7 @@ package body Vhdl.Sem_Decls is
             Set_Signature_Prefix (Sig, Null_Iir);
          end if;
 
-         Sem_Scopes.Add_Name (Res);
+         Sem_Scopes.Replace_Alias_Name (Res, Alias);
          Name_Visible (Res);
 
          Free_Iir (Alias);
@@ -2436,7 +2453,8 @@ package body Vhdl.Sem_Decls is
       Vstyp : Iir;
       El : Iir;
       El_Decl : Iir;
-      Vtyp_Els : Iir_Flist;
+      Vtyp_Els, Def_List : Iir_Flist;
+      Pos : Natural;
       Interp : Name_Interpretation_Type;
    begin
       Sem_Scopes.Add_Name (Decl);
@@ -2505,15 +2523,14 @@ package body Vhdl.Sem_Decls is
 
       --  Analyze simple_name of elements.
       if Vtyp_Els /= Null_Iir_Flist then
+         Def_List := Create_Iir_Flist (Get_Nbr_Elements (Vtyp_Els));
+         Set_Elements_Definition_List (Decl, Def_List);
+
          --  Create a temporary scope to speed-up search of record elements.
          Open_Declarative_Region;
          for I in Flist_First .. Flist_Last (Vtyp_Els) loop
             El_Decl := Get_Nth_Element (Vtyp_Els, I);
             Add_Name (El_Decl);
-
-            --  Reuse visible_flag to know if a record element has been
-            --  associated to a mode.
-            Set_Visible_Flag (El_Decl, False);
          end loop;
 
          El := Get_Elements_Definition_Chain (Decl);
@@ -2529,12 +2546,14 @@ package body Vhdl.Sem_Decls is
                case Get_Kind (El_Decl) is
                   when Iir_Kind_Element_Declaration
                     | Iir_Kind_Record_Element_Constraint =>
-                     if Get_Visible_Flag (El_Decl) then
+                     Pos := Natural (Get_Element_Position (El_Decl));
+                     if Get_Nth_Element (Def_List, Pos) /= Null_Iir then
                         Error_Msg_Sem
                           (+El, "element %i has already a mode", +El);
+                     else
+                        Set_Nth_Element (Def_List, Pos, El);
                      end if;
                      Set_Named_Entity (El, El_Decl);
-                     Set_Visible_Flag (El_Decl, True);
                   when others =>
                      Error_Msg_Sem
                        (+El, "%i is not an element of the record", +El);
@@ -2545,11 +2564,10 @@ package body Vhdl.Sem_Decls is
          end loop;
 
          for I in Flist_First .. Flist_Last (Vtyp_Els) loop
-            El_Decl := Get_Nth_Element (Vtyp_Els, I);
-            if not Get_Visible_Flag (El_Decl) then
+            if Get_Nth_Element (Def_List, I) = Null_Iir then
+               El_Decl := Get_Nth_Element (Vtyp_Els, I);
                Error_Msg_Sem
                  (+Decl, "no mode for element %i", +El_Decl);
-               Set_Visible_Flag (El_Decl, True);
             end if;
          end loop;
 
@@ -2834,6 +2852,44 @@ package body Vhdl.Sem_Decls is
       End_Of_Declarations_For_Implicit_Declarations (Parent, Last_Decl);
    end Sem_Declaration_Chain;
 
+   procedure Mark_Declarations_Elaborated (Hdr : Iir; Flag : Boolean)
+   is
+      Decl : Iir;
+   begin
+      Decl := Get_Declaration_Chain (Hdr);
+      while Decl /= Null_Iir loop
+         case Get_Kind (Decl) is
+            when Iir_Kinds_Subprogram_Declaration =>
+               --  The flag can always be set, but not cleared on implicit
+               --  subprograms.
+               if Flag
+                 or else
+                 Get_Implicit_Definition (Decl) not in Iir_Predefined_Implicit
+               then
+                  Set_Elaborated_Flag (Decl, Flag);
+               end if;
+            when Iir_Kind_Type_Declaration =>
+               declare
+                  Def : constant Iir := Get_Type_Definition (Decl);
+               begin
+                  if Get_Kind (Def) = Iir_Kind_Protected_Type_Declaration then
+                     --  Mark the protected type as elaborated.
+                     --  Mark the methods as elaborated.
+                     Set_Elaborated_Flag (Def, Flag);
+                     Mark_Declarations_Elaborated (Def, Flag);
+                  end if;
+               end;
+            when Iir_Kind_Package_Instantiation_Declaration =>
+               if not Get_Immediate_Body_Flag (Decl) then
+                  Mark_Declarations_Elaborated (Decl, Flag);
+               end if;
+            when others =>
+               null;
+         end case;
+         Decl := Get_Chain (Decl);
+      end loop;
+   end Mark_Declarations_Elaborated;
+
    procedure Check_Full_Declaration (Decls_Parent : Iir; Decl: Iir)
    is
       procedure Warn_Unused (E : Iir) is
@@ -2945,6 +3001,10 @@ package body Vhdl.Sem_Decls is
                  and then Get_Package_Body (El) = Null_Iir
                then
                   Error_Msg_Sem (+El, "missing package body for %n", +El);
+               end if;
+            when Iir_Kind_Package_Instantiation_Declaration =>
+               if not Get_Immediate_Body_Flag (El) then
+                  Mark_Declarations_Elaborated (El, True);
                end if;
             when others =>
                null;

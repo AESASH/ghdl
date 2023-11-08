@@ -102,7 +102,7 @@ package body Elab.Vhdl_Insts is
                            Dyn : Dyn_Name;
                         begin
                            Synth_Assignment_Prefix
-                             (Syn_Inst, Formal,
+                             (Syn_Inst, Sub_Inst, Formal,
                               Formal_Base, Formal_Typ, Formal_Offs, Dyn);
                            pragma Assert (Dyn = No_Dyn_Name);
                         end;
@@ -126,7 +126,8 @@ package body Elab.Vhdl_Insts is
                   Set_Error (Sub_Inst);
                elsif not Is_Static (Val.Val) then
                   Error_Msg_Elab
-                    (+Assoc, "value of generic %i must be static", +Inter);
+                    (Syn_Inst, Assoc,
+                     "value of generic %i must be static", +Inter);
                   Val := No_Valtyp;
                   Set_Error (Sub_Inst);
                end if;
@@ -177,8 +178,9 @@ package body Elab.Vhdl_Insts is
                      Act_Typ := Get_Subtype_Object (Syn_Inst, Act);
                   end if;
                   Act_Typ := Unshare (Act_Typ, Instance_Pool);
-                  Create_Subtype_Object
-                    (Sub_Inst, Get_Interface_Type_Definition (Inter), Act_Typ);
+                  Create_Interface_Type
+                    (Sub_Inst, Get_Interface_Type_Definition (Inter),
+                     Act_Typ, Act);
                   Release_Expr_Pool (Marker);
                end;
 
@@ -340,6 +342,7 @@ package body Elab.Vhdl_Insts is
                      Bod : constant Node := Get_Package_Body (Dep_Unit);
                      Bod_Unit : Node;
                   begin
+                     --  Dependencies of the package.
                      Elab_Dependencies (Parent_Inst, Dep);
                      Elab_Package_Declaration (Parent_Inst, Dep_Unit);
                      --  Do not try to elaborate math_real body: there are
@@ -424,6 +427,51 @@ package body Elab.Vhdl_Insts is
       end loop;
    end Apply_Block_Configuration;
 
+   procedure Unapply_Block_Configuration (Cfg : Node)
+   is
+      Item : Node;
+   begin
+      Item := Get_Configuration_Item_Chain (Cfg);
+      while Item /= Null_Node loop
+         case Get_Kind (Item) is
+            when Iir_Kind_Component_Configuration =>
+               declare
+                  List : constant Iir_Flist :=
+                    Get_Instantiation_List (Item);
+                  El : Node;
+                  Inst : Node;
+               begin
+                  for I in Flist_First .. Flist_Last (List) loop
+                     El := Get_Nth_Element (List, I);
+                     Inst := Get_Named_Entity (El);
+                     Set_Component_Configuration (Inst, Null_Node);
+                  end loop;
+               end;
+            when Iir_Kind_Block_Configuration =>
+               declare
+                  Sub_Blk : constant Node := Get_Block_From_Block_Specification
+                    (Get_Block_Specification (Item));
+                  Prev : Node;
+               begin
+                  case Get_Kind (Sub_Blk) is
+                     when Iir_Kind_Generate_Statement_Body =>
+                        -- Linked chain.
+                        Prev := Get_Prev_Block_Configuration (Item);
+                        Set_Generate_Block_Configuration (Sub_Blk, Prev);
+                     when Iir_Kind_Block_Statement =>
+                        Set_Block_Block_Configuration (Sub_Blk, Null_Node);
+                     when others =>
+                        Vhdl.Errors.Error_Kind
+                          ("unapply_block_configuration(blk)", Sub_Blk);
+                  end case;
+               end;
+            when others =>
+               Vhdl.Errors.Error_Kind ("unapply_block_configuration", Item);
+         end case;
+         Item := Get_Chain (Item);
+      end loop;
+   end Unapply_Block_Configuration;
+
    function Elab_Port_Association_Type (Sub_Inst : Synth_Instance_Acc;
                                         Syn_Inst : Synth_Instance_Acc;
                                         Inter : Node;
@@ -487,7 +535,8 @@ package body Elab.Vhdl_Insts is
          Release_Expr_Pool (Marker);
          return Res;
       else
-         return Elab_Declaration_Type (Sub_Inst, Inter);
+         Res := Elab_Declaration_Type (Sub_Inst, Inter);
+         return Res;
       end if;
    end Elab_Port_Association_Type;
 
@@ -509,6 +558,75 @@ package body Elab.Vhdl_Insts is
             Inter_Typ := Elab_Port_Association_Type
               (Sub_Inst, Syn_Inst, Inter, Assoc);
             if Inter_Typ /= null then
+               --  Check matching bounds.
+               if Get_Kind (Assoc) = Iir_Kind_Association_Element_By_Name
+                 and then Get_Formal_Conversion (Assoc) = Null_Node
+                 and then Get_Actual_Conversion (Assoc) = Null_Node
+               then
+                  declare
+                     use Synth.Vhdl_Stmts;
+                     Marker : Mark_Type;
+                     Actual : constant Node := Get_Actual (Assoc);
+                     Actual_Base : Valtyp;
+                     Actual_Typ : Type_Acc;
+                     Actual_Offs : Value_Offsets;
+                     Same : Boolean;
+                  begin
+                     Mark_Expr_Pool (Marker);
+
+                     Synth_Assignment_Prefix
+                       (Syn_Inst, Actual,
+                        Actual_Base, Actual_Typ, Actual_Offs);
+                     case Inter_Typ.Kind is
+                        when Type_All_Discrete =>
+                           Same := Inter_Typ.Drange = Actual_Typ.Drange;
+                        when Type_Float =>
+                           Same := Inter_Typ.Frange = Actual_Typ.Frange;
+                        when Type_Composite =>
+                           if not Check_Matching_Bounds (Syn_Inst, Inter_Typ,
+                                                         Actual_Typ, Assoc)
+                           then
+                              null;
+                           end if;
+                           Same := True;
+                        when Type_Slice
+                          | Type_Protected
+                          | Type_Access
+                          | Type_File =>
+                           raise Internal_Error;
+                     end case;
+                     if not Same then
+                        Error_Msg_Elab
+                          (Syn_Inst, Assoc,
+                           "range of formal %i is different from formal range",
+                           +Inter);
+                     end if;
+                     Release_Expr_Pool (Marker);
+                  end;
+               elsif (Get_Kind (Assoc)
+                        = Iir_Kind_Association_Element_By_Individual)
+               then
+                  --  Check matching bounds.
+                  declare
+                     Marker : Mark_Type;
+                     Actual_Typ : Type_Acc;
+                  begin
+                     Mark_Expr_Pool (Marker);
+
+                     --  Although actual type is defined in Syn_Inst, its
+                     --  parent is defined in Sub_Inst.
+                     Actual_Typ := Synth_Subtype_Indication
+                       (Sub_Inst, Get_Actual_Type (Assoc));
+
+                     if not Check_Matching_Bounds (Syn_Inst, Inter_Typ,
+                                                   Actual_Typ, Assoc)
+                     then
+                        --  Error message already emitted.
+                        null;
+                     end if;
+                     Release_Expr_Pool (Marker);
+                  end;
+               end if;
                Create_Signal (Sub_Inst, Inter, Inter_Typ);
             end if;
          end if;
@@ -604,6 +722,8 @@ package body Elab.Vhdl_Insts is
            | Iir_Kind_Concurrent_Procedure_Call_Statement
            | Iir_Kind_Concurrent_Break_Statement
            | Iir_Kind_Simple_Simultaneous_Statement
+           | Iir_Kind_Simultaneous_If_Statement
+           | Iir_Kind_Simultaneous_Case_Statement
            | Iir_Kinds_Process_Statement =>
             null;
          when Iir_Kind_If_Generate_Statement
@@ -742,6 +862,8 @@ package body Elab.Vhdl_Insts is
          pragma Assert (Is_Expr_Pool_Empty);
       end if;
 
+      Unapply_Block_Configuration (Config);
+
       if not Is_Error (Syn_Inst) then
          Elab_Recurse_Instantiations (Syn_Inst, Arch);
          pragma Assert (Areapools.Is_Empty (Expr_Pool));
@@ -825,25 +947,9 @@ package body Elab.Vhdl_Insts is
 
       --  Create objects for the inputs and the outputs of the component,
       --  assign inputs (that's nets) and create wires for outputs.
-      declare
-         Assoc : Node;
-         Assoc_Inter : Node;
-         Inter : Node;
-         Inter_Typ : Type_Acc;
-      begin
-         Assoc := Get_Port_Map_Aspect_Chain (Stmt);
-         Assoc_Inter := Get_Port_Chain (Component);
-         while Is_Valid (Assoc) loop
-            if Get_Whole_Association_Flag (Assoc) then
-               Inter := Get_Association_Interface (Assoc, Assoc_Inter);
-
-               Inter_Typ := Elab_Port_Association_Type
-                 (Comp_Inst, Syn_Inst, Inter, Assoc);
-               Create_Signal (Comp_Inst, Inter, Inter_Typ);
-            end if;
-            Next_Association_Interface (Assoc, Assoc_Inter);
-         end loop;
-      end;
+      Elab_Ports_Association_Type (Comp_Inst, Syn_Inst,
+                                   Get_Port_Chain (Component),
+                                   Get_Port_Map_Aspect_Chain (Stmt));
 
       Set_Component_Configuration (Stmt, Null_Node);
 
@@ -930,6 +1036,7 @@ package body Elab.Vhdl_Insts is
          when Iir_Kind_Entity_Aspect_Configuration =>
             Config := Get_Configuration (Aspect);
             Arch := Get_Block_Specification (Get_Block_Configuration (Config));
+            Arch := Get_Named_Entity (Arch);
          when Iir_Kind_Entity_Aspect_Open =>
             return;
       end case;
@@ -1053,10 +1160,28 @@ package body Elab.Vhdl_Insts is
 
       --  Clear elab_flag
       for I in Design_Units.First .. Design_Units.Last loop
-         Set_Elab_Flag (Design_Units.Table (I), False);
+         declare
+            Unit : constant Node := Design_Units.Table (I);
+            Lib_Unit : Node;
+         begin
+            if not Get_Elab_Flag (Unit) then
+               Lib_Unit := Get_Library_Unit (Unit);
+               if Get_Kind (Lib_Unit) = Iir_Kind_Package_Declaration
+                 and then not Is_Uninstantiated_Package (Lib_Unit)
+               then
+                  Clear_Package_Object (Root_Instance, Lib_Unit);
+               end if;
+            else
+               Set_Elab_Flag (Unit, False);
+            end if;
+         end;
       end loop;
 
       return Top_Inst;
+
+   exception
+      when Elaboration_Error =>
+         return null;
    end Elab_Top_Unit;
 
 end Elab.Vhdl_Insts;

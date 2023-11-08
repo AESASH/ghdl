@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2009-2015 Tony Bybell.
+ * Copyright (c) 2009-2023 Tony Bybell.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -18,6 +18,8 @@
  * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
  * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
  * DEALINGS IN THE SOFTWARE.
+ *
+ * SPDX-License-Identifier: MIT
  */
 
 /*
@@ -37,11 +39,15 @@
  *
  */
 
-#include <config.h>
+#ifndef FST_CONFIG_INCLUDE
+# define FST_CONFIG_INCLUDE <config.h>
+#endif
+#include FST_CONFIG_INCLUDE
 
 #include "fstapi.h"
 #include "fastlz.h"
 #include "lz4.h"
+#include <errno.h>
 
 #ifndef HAVE_LIBPTHREAD
 #undef FST_WRITER_PARALLEL
@@ -52,6 +58,7 @@
 #endif
 
 #ifdef __MINGW32__
+#define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #endif
 
@@ -72,6 +79,12 @@
 
 #ifndef PATH_MAX
 #define PATH_MAX (4096)
+#endif
+
+#if defined(_MSC_VER)
+typedef int64_t fst_off_t;
+#else
+typedef off_t fst_off_t;
 #endif
 
 /* note that Judy versus Jenkins requires more experimentation: they are  */
@@ -119,7 +132,7 @@ void **JenkinsIns(void *base_i, const unsigned char *mem, uint32_t length, uint3
 #define FST_GZIO_LEN                    (32768)
 #define FST_HDR_FOURPACK_DUO_SIZE       (4*1024*1024)
 
-#if defined(__i386__) || defined(__x86_64__) || defined(_AIX)
+#if defined(__i386__) || defined(__x86_64__) || defined(_AIX) || defined(__aarch64__)
 #define FST_DO_MISALIGNED_OPS
 #endif
 
@@ -128,6 +141,21 @@ void **JenkinsIns(void *base_i, const unsigned char *mem, uint32_t length, uint3
 #include <sys/sysctl.h>
 #endif
 
+#if defined(FST_MACOSX) || defined(__MINGW32__) || defined(__OpenBSD__) || defined(__FreeBSD__) || defined(__NetBSD__)
+#define FST_UNBUFFERED_IO
+#endif
+
+#ifdef __GNUC__
+/* Boolean expression more often true than false */
+#define FST_LIKELY(x) __builtin_expect(!!(x), 1)
+/* Boolean expression more often false than true */
+#define FST_UNLIKELY(x) __builtin_expect(!!(x), 0)
+#else
+#define FST_LIKELY(x) (!!(x))
+#define FST_UNLIKELY(x) (!!(x))
+#endif
+
+#define FST_APIMESS "FSTAPI  | "
 
 /***********************/
 /***                 ***/
@@ -138,8 +166,8 @@ void **JenkinsIns(void *base_i, const unsigned char *mem, uint32_t length, uint3
 #ifdef __MINGW32__
 #include <io.h>
 #ifndef HAVE_FSEEKO
-#define ftello ftell
-#define fseeko fseek
+#define ftello _ftelli64
+#define fseeko _fseeki64
 #endif
 #endif
 
@@ -193,7 +221,7 @@ if(nam) /* cppcheck warning fix: nam is always defined, so this is not needed */
         dwRetVal = GetTempPath(MAX_PATH, lpTempPathBuffer);
         if((dwRetVal > MAX_PATH) || (dwRetVal == 0))
                 {
-                fprintf(stderr, "GetTempPath() failed in "__FILE__" line %d, exiting.\n", __LINE__);
+                fprintf(stderr, FST_APIMESS "GetTempPath() failed in " __FILE__ " line %d, exiting.\n", __LINE__);
                 exit(255);
                 }
                 else
@@ -201,7 +229,7 @@ if(nam) /* cppcheck warning fix: nam is always defined, so this is not needed */
                 uRetVal = GetTempFileName(lpTempPathBuffer, TEXT("FSTW"), 0, szTempFileName);
                 if (uRetVal == 0)
                         {
-                        fprintf(stderr, "GetTempFileName() failed in "__FILE__" line %d, exiting.\n", __LINE__);
+                        fprintf(stderr, FST_APIMESS "GetTempFileName() failed in " __FILE__ " line %d, exiting.\n", __LINE__);
                         exit(255);
                         }
                         else
@@ -267,7 +295,7 @@ static size_t fstFwrite(const void *buf, size_t siz, size_t cnt, FILE *fp)
 return(fwrite(buf, siz, cnt, fp));
 }
 
-static int fstFtruncate(int fd, off_t length)
+static int fstFtruncate(int fd, fst_off_t length)
 {
 return(ftruncate(fd, length));
 }
@@ -282,7 +310,7 @@ static char *fstRealpath(const char *path, char *resolved_path)
 #if (defined(__MACH__) && defined(__APPLE__))
 if(!resolved_path)
         {
-        resolved_path = malloc(PATH_MAX+1); /* fixes bug on Leopard when resolved_path == NULL */
+        resolved_path = (char *)malloc(PATH_MAX+1); /* fixes bug on Leopard when resolved_path == NULL */
         }
 #endif
 
@@ -292,7 +320,7 @@ return(realpath(path, resolved_path));
 #ifdef __MINGW32__
 if(!resolved_path)
         {
-        resolved_path = malloc(PATH_MAX+1);
+        resolved_path = (char *)malloc(PATH_MAX+1);
         }
 return(_fullpath(resolved_path, path, PATH_MAX));
 #else
@@ -307,26 +335,22 @@ return(NULL);
 /*
  * mmap compatibility
  */
-#if defined __CYGWIN__ || defined __MINGW32__
+#if defined __MINGW32__
 #include <limits.h>
 #define fstMmap(__addr,__len,__prot,__flags,__fd,__off) fstMmap2((__len), (__fd), (__off))
-#define fstMunmap(__addr,__len)                         free(__addr)
+#define fstMunmap(__addr,__len)                         UnmapViewOfFile((LPCVOID)__addr)
 
-static void *fstMmap2(size_t __len, int __fd, off_t __off)
+static void *fstMmap2(size_t __len, int __fd, fst_off_t __off)
 {
-(void)__off;
+HANDLE handle = CreateFileMapping((HANDLE)_get_osfhandle(__fd), NULL,
+				  PAGE_READWRITE, (DWORD)((__len >> 16) >> 16),
+				  (DWORD)__len, NULL);
+if (!handle) { return NULL; }
 
-unsigned char *pnt = malloc(__len);
-off_t cur_offs = lseek(__fd, 0, SEEK_CUR);
-size_t i;
-
-lseek(__fd, 0, SEEK_SET);
-for(i=0;i<__len;i+=SSIZE_MAX)
-        {
-        read(__fd, pnt + i, ((__len - i) >= SSIZE_MAX) ? SSIZE_MAX : (__len - i));
-        }
-lseek(__fd, cur_offs, SEEK_SET);
-return(pnt);
+void *ptr = MapViewOfFileEx(handle, FILE_MAP_READ | FILE_MAP_WRITE,
+			    0, (DWORD)__off, (SIZE_T)__len, (LPVOID)NULL);
+CloseHandle(handle);
+return ptr;
 }
 #else
 #include <sys/mman.h>
@@ -660,6 +684,7 @@ return(rc);
 }
 
 
+#ifndef FST_DYNAMIC_ALIAS2_DISABLE
 static int fstWriterSVarint(FILE *handle, int64_t v)
 {
 unsigned char buf[15]; /* ceil(64/7) = 10 + sign byte padded way up */
@@ -685,6 +710,7 @@ len = pnt-buf;
 fstFwrite(buf, len, 1, handle);
 return(len);
 }
+#endif
 
 
 /***********************/
@@ -715,10 +741,13 @@ FILE *tchn_handle;
 
 unsigned char *vchg_mem;
 
-off_t hier_file_len;
+fst_off_t hier_file_len;
 
 uint32_t *valpos_mem;
 unsigned char *curval_mem;
+
+unsigned char *outval_mem; /* for two-state / Verilator-style value changes */
+uint32_t outval_alloc_siz;
 
 char *filename;
 
@@ -732,7 +761,7 @@ unsigned fourpack : 1;
 unsigned fastpack : 1;
 
 int64_t timezero;
-off_t section_header_truncpos;
+fst_off_t section_header_truncpos;
 uint32_t tchn_cnt, tchn_idx;
 uint64_t curtime;
 uint64_t firsttime;
@@ -740,7 +769,7 @@ uint32_t vchg_siz;
 uint32_t vchg_alloc_siz;
 
 uint32_t secnum;
-off_t section_start;
+fst_off_t section_start;
 
 uint32_t numscopes;
 double nan; /* nan value for uninitialized doubles */
@@ -772,6 +801,7 @@ pthread_t thread;
 pthread_attr_t thread_attr;
 struct fstWriterContext *xc_parent;
 #endif
+unsigned in_pthread : 1;
 
 size_t fst_orig_break_size;
 size_t fst_orig_break_add_size;
@@ -792,10 +822,12 @@ char *geom_handle_nam;
 char *valpos_handle_nam;
 char *curval_handle_nam;
 char *tchn_handle_nam;
+
+fstEnumHandle max_enumhandle;
 };
 
 
-static int fstWriterFseeko(struct fstWriterContext *xc, FILE *stream, off_t offset, int whence)
+static int fstWriterFseeko(struct fstWriterContext *xc, FILE *stream, fst_off_t offset, int whence)
 {
 int rc = fseeko(stream, offset, whence);
 
@@ -803,7 +835,7 @@ if(rc<0)
         {
         xc->fseek_failed = 1;
 #ifdef FST_DEBUG
-        fprintf(stderr, "Seek to #%"PRId64" (whence = %d) failed!\n", offset, whence);
+        fprintf(stderr, FST_APIMESS "Seek to #%" PRId64 " (whence = %d) failed!\n", offset, whence);
         perror("Why");
 #endif
         }
@@ -947,9 +979,34 @@ fflush(xc->handle);
 /*
  * mmap functions
  */
+static void fstWriterMmapSanity(void *pnt, const char *file, int line, const char *usage)
+{
+if(pnt == NULL
+#ifdef MAP_FAILED
+   || pnt == MAP_FAILED
+#endif
+  )
+	{
+	fprintf(stderr, "fstMmap() assigned to %s failed: errno: %d, file %s, line %d.\n", usage, errno, file, line);
+#if !defined(__MINGW32__)
+	perror("Why");
+#else
+	LPSTR mbuf = NULL;
+	FormatMessage(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM
+		      | FORMAT_MESSAGE_IGNORE_INSERTS, NULL, GetLastError(),
+		      MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+		      (LPSTR)&mbuf, 0, NULL);
+	fprintf(stderr, "%s", mbuf);
+	LocalFree(mbuf);
+#endif
+	pnt = NULL;
+	}
+}
+
+
 static void fstWriterCreateMmaps(struct fstWriterContext *xc)
 {
-off_t curpos = ftello(xc->handle);
+fst_off_t curpos = ftello(xc->handle);
 
 fflush(xc->hier_handle);
 
@@ -969,12 +1026,20 @@ fflush(xc->handle);
 if(!xc->valpos_mem)
         {
         fflush(xc->valpos_handle);
-        xc->valpos_mem = fstMmap(NULL, xc->maxhandle * 4 * sizeof(uint32_t), PROT_READ|PROT_WRITE, MAP_SHARED, fileno(xc->valpos_handle), 0);
+	errno = 0;
+	if(xc->maxhandle)
+		{
+	        fstWriterMmapSanity(xc->valpos_mem = (uint32_t *)fstMmap(NULL, xc->maxhandle * 4 * sizeof(uint32_t), PROT_READ|PROT_WRITE, MAP_SHARED, fileno(xc->valpos_handle), 0), __FILE__, __LINE__, "xc->valpos_mem");
+		}
         }
 if(!xc->curval_mem)
         {
         fflush(xc->curval_handle);
-        xc->curval_mem = fstMmap(NULL, xc->maxvalpos, PROT_READ|PROT_WRITE, MAP_SHARED, fileno(xc->curval_handle), 0);
+	errno = 0;
+	if(xc->maxvalpos)
+		{
+	        fstWriterMmapSanity(xc->curval_mem = (unsigned char *)fstMmap(NULL, xc->maxvalpos, PROT_READ|PROT_WRITE, MAP_SHARED, fileno(xc->curval_handle), 0), __FILE__, __LINE__, "xc->curval_handle");
+		}
         }
 }
 
@@ -985,27 +1050,6 @@ static void fstDestroyMmaps(struct fstWriterContext *xc, int is_closing)
 
 fstMunmap(xc->valpos_mem, xc->maxhandle * 4 * sizeof(uint32_t));
 xc->valpos_mem = NULL;
-
-#if defined __CYGWIN__ || defined __MINGW32__
-if(xc->curval_mem)
-        {
-        if(!is_closing) /* need to flush out for next emulated mmap() read */
-                {
-                unsigned char *pnt = xc->curval_mem;
-                int __fd = fileno(xc->curval_handle);
-                off_t cur_offs = lseek(__fd, 0, SEEK_CUR);
-                size_t i;
-                size_t __len = xc->maxvalpos;
-
-                lseek(__fd, 0, SEEK_SET);
-                for(i=0;i<__len;i+=SSIZE_MAX)
-                        {
-                        write(__fd, pnt + i, ((__len - i) >= SSIZE_MAX) ? SSIZE_MAX : (__len - i));
-                        }
-                lseek(__fd, cur_offs, SEEK_SET);
-                }
-        }
-#endif
 
 fstMunmap(xc->curval_mem, xc->maxvalpos);
 xc->curval_mem = NULL;
@@ -1105,7 +1149,7 @@ xc->next_huge_break = FST_ACTIVATE_HUGE_BREAK;
  */
 void *fstWriterCreate(const char *nam, int use_compressed_hier)
 {
-struct fstWriterContext *xc = calloc(1, sizeof(struct fstWriterContext));
+struct fstWriterContext *xc = (struct fstWriterContext *)calloc(1, sizeof(struct fstWriterContext));
 
 xc->compress_hier = use_compressed_hier;
 fstDetermineBreakSize(xc);
@@ -1119,7 +1163,7 @@ if((!nam)||
         else
         {
         int flen = strlen(nam);
-        char *hf = calloc(1, flen + 6);
+        char *hf = (char *)calloc(1, flen + 6);
 
         memcpy(hf, nam, flen);
         strcpy(hf + flen, ".hier");
@@ -1130,7 +1174,7 @@ if((!nam)||
         xc->curval_handle = tmpfile_open(&xc->curval_handle_nam);       /* .bits */
         xc->tchn_handle = tmpfile_open(&xc->tchn_handle_nam);           /* .tchn */
         xc->vchg_alloc_siz = xc->fst_break_size + xc->fst_break_add_size;
-        xc->vchg_mem = malloc(xc->vchg_alloc_siz);
+        xc->vchg_mem = (unsigned char *)malloc(xc->vchg_alloc_siz);
 
         if(xc->hier_handle && xc->geom_handle && xc->valpos_handle && xc->curval_handle && xc->vchg_mem && xc->tchn_handle)
                 {
@@ -1179,7 +1223,7 @@ if(xc)
         int rc;
 
         destlen = xc->maxvalpos;
-        dmem = malloc(compressBound(destlen));
+        dmem = (unsigned char *)malloc(compressBound(destlen));
         rc = compress2(dmem, &destlen, xc->curval_mem, xc->maxvalpos, 4); /* was 9...which caused performance drag on traces with many signals */
 
         fputc(FST_BL_SKIP, xc->handle);                 /* temporarily tag the section, use FST_BL_VCDATA on finalize */
@@ -1234,14 +1278,14 @@ int cnt = 0;
 unsigned int i;
 unsigned char *vchg_mem;
 FILE *f;
-off_t fpos, indxpos, endpos;
+fst_off_t fpos, indxpos, endpos;
 uint32_t prevpos;
 int zerocnt;
 unsigned char *scratchpad;
 unsigned char *scratchpnt;
 unsigned char *tmem;
-off_t tlen;
-off_t unc_memreq = 0; /* for reader */
+fst_off_t tlen;
+fst_off_t unc_memreq = 0; /* for reader */
 unsigned char *packmem;
 unsigned int packmemlen;
 uint32_t *vm4ip;
@@ -1268,7 +1312,7 @@ if((xc->vchg_siz <= 1)||(xc->already_in_flush)) return;
 xc->already_in_flush = 1; /* should really do this with a semaphore */
 
 xc->section_header_only = 0;
-scratchpad = malloc(xc->vchg_siz);
+scratchpad = (unsigned char *)malloc(xc->vchg_siz);
 
 vchg_mem = xc->vchg_mem;
 
@@ -1278,7 +1322,7 @@ fputc(xc->fourpack ? '4' : (xc->fastpack ? 'F' : 'Z'), f);
 fpos = 1;
 
 packmemlen = 1024;                      /* maintain a running "longest" allocation to */
-packmem = malloc(packmemlen);           /* prevent continual malloc...free every loop iter */
+packmem = (unsigned char *)malloc(packmemlen);           /* prevent continual malloc...free every loop iter */
 
 for(i=0;i<xc->maxhandle;i++)
         {
@@ -1398,13 +1442,13 @@ for(i=0;i<xc->maxhandle;i++)
                                         idx = ((vm4ip[1]+7) & ~7);
                                         switch(vm4ip[1] & 7)
                                                 {
-                                                case 0: do {    acc  = (pnt[idx+7-8] & 1) << 0;
-                                                case 7:         acc |= (pnt[idx+6-8] & 1) << 1;
-                                                case 6:         acc |= (pnt[idx+5-8] & 1) << 2;
-                                                case 5:         acc |= (pnt[idx+4-8] & 1) << 3;
-                                                case 4:         acc |= (pnt[idx+3-8] & 1) << 4;
-                                                case 3:         acc |= (pnt[idx+2-8] & 1) << 5;
-                                                case 2:         acc |= (pnt[idx+1-8] & 1) << 6;
+                                                case 0: do {    acc  = (pnt[idx+7-8] & 1) << 0; /* fallthrough */
+                                                case 7:         acc |= (pnt[idx+6-8] & 1) << 1; /* fallthrough */
+                                                case 6:         acc |= (pnt[idx+5-8] & 1) << 2; /* fallthrough */
+                                                case 5:         acc |= (pnt[idx+4-8] & 1) << 3; /* fallthrough */
+                                                case 4:         acc |= (pnt[idx+3-8] & 1) << 4; /* fallthrough */
+                                                case 3:         acc |= (pnt[idx+2-8] & 1) << 5; /* fallthrough */
+                                                case 2:         acc |= (pnt[idx+1-8] & 1) << 6; /* fallthrough */
                                                 case 1:         acc |= (pnt[idx+0-8] & 1) << 7;
                                                                 *(--scratchpnt) = acc;
                                                                 idx -= 8;
@@ -1440,7 +1484,7 @@ for(i=0;i<xc->maxhandle;i++)
                                         else
                                         {
                                         free(packmem);
-                                        dmem = packmem = malloc(compressBound(packmemlen = wrlen));
+                                        dmem = packmem = (unsigned char *)malloc(compressBound(packmemlen = wrlen));
                                         }
 
                                 rc = compress2(dmem, &destlen, scratchpnt, wrlen, 4);
@@ -1495,7 +1539,7 @@ for(i=0;i<xc->maxhandle;i++)
                                         else
                                         {
                                         free(packmem);
-                                        dmem = packmem = malloc(packmemlen = (wrlen * 2) + 2);
+                                        dmem = packmem = (unsigned char *)malloc(packmemlen = (wrlen * 2) + 2);
                                         }
 
                                 rc = (xc->fourpack) ? LZ4_compress((char *)scratchpnt, (char *)dmem, wrlen) : fastlz_compress(scratchpnt, wrlen, dmem);
@@ -1663,7 +1707,7 @@ if(zerocnt)
         /* fpos += */ fstWriterVarint(f, (zerocnt << 1)); /* scan-build */
         }
 #ifdef FST_DEBUG
-fprintf(stderr, "value chains: %d\n", cnt);
+fprintf(stderr, FST_APIMESS "value chains: %d\n", cnt);
 #endif
 
 xc->vchg_mem[0] = '!';
@@ -1677,14 +1721,15 @@ fflush(xc->tchn_handle);
 tlen = ftello(xc->tchn_handle);
 fstWriterFseeko(xc, xc->tchn_handle, 0, SEEK_SET);
 
-tmem = fstMmap(NULL, tlen, PROT_READ|PROT_WRITE, MAP_SHARED, fileno(xc->tchn_handle), 0);
+errno = 0;
+fstWriterMmapSanity(tmem = (unsigned char *)fstMmap(NULL, tlen, PROT_READ|PROT_WRITE, MAP_SHARED, fileno(xc->tchn_handle), 0), __FILE__, __LINE__, "tmem");
 if(tmem)
         {
         unsigned long destlen = tlen;
-        unsigned char *dmem = malloc(compressBound(destlen));
+        unsigned char *dmem = (unsigned char *)malloc(compressBound(destlen));
         int rc = compress2(dmem, &destlen, tmem, tlen, 9);
 
-        if((rc == Z_OK) && (((off_t)destlen) < tlen))
+        if((rc == Z_OK) && (((fst_off_t)destlen) < tlen))
                 {
                 fstFwrite(dmem, destlen, 1, xc->handle);
                 }
@@ -1732,13 +1777,13 @@ fstWriterFseeko(xc, xc->handle, endpos, SEEK_SET);                              
 xc2->section_header_truncpos = endpos;                          /* cache in case of need to truncate */
 if(xc->dump_size_limit)
         {
-        if(endpos >= ((off_t)xc->dump_size_limit))
+        if(endpos >= ((fst_off_t)xc->dump_size_limit))
                 {
                 xc2->skip_writing_section_hdr = 1;
                 xc2->size_limit_locked = 1;
                 xc2->is_initial_time = 1; /* to trick emit value and emit time change */
 #ifdef FST_DEBUG
-                fprintf(stderr, "<< dump file size limit reached, stopping dumping >>\n");
+                fprintf(stderr, FST_APIMESS "<< dump file size limit reached, stopping dumping >>\n");
 #endif
                 }
         }
@@ -1757,10 +1802,10 @@ xc->already_in_flush = 0;
 static void *fstWriterFlushContextPrivate1(void *ctx)
 {
 struct fstWriterContext *xc = (struct fstWriterContext *)ctx;
+struct fstWriterContext *xc_parent;
 
+pthread_mutex_lock(&(xc->xc_parent->mutex));
 fstWriterFlushContextPrivate2(xc);
-
-pthread_mutex_unlock(&(xc->xc_parent->mutex));
 
 #ifdef FST_REMOVE_DUPLICATE_VC
 free(xc->curval_mem);
@@ -1768,7 +1813,11 @@ free(xc->curval_mem);
 free(xc->valpos_mem);
 free(xc->vchg_mem);
 tmpfile_close(&xc->tchn_handle, &xc->tchn_handle_nam);
+xc_parent = xc->xc_parent;
 free(xc);
+
+xc_parent->in_pthread = 0;
+pthread_mutex_unlock(&(xc_parent->mutex));
 
 return(NULL);
 }
@@ -1780,7 +1829,7 @@ struct fstWriterContext *xc = (struct fstWriterContext *)ctx;
 
 if(xc->parallel_enabled)
         {
-        struct fstWriterContext *xc2 = malloc(sizeof(struct fstWriterContext));
+        struct fstWriterContext *xc2 = (struct fstWriterContext *)malloc(sizeof(struct fstWriterContext));
         unsigned int i;
 
         pthread_mutex_lock(&xc->mutex);
@@ -1789,16 +1838,16 @@ if(xc->parallel_enabled)
         xc->xc_parent = xc;
         memcpy(xc2, xc, sizeof(struct fstWriterContext));
 
-        xc2->valpos_mem = malloc(xc->maxhandle * 4 * sizeof(uint32_t));
+        xc2->valpos_mem = (uint32_t *)malloc(xc->maxhandle * 4 * sizeof(uint32_t));
         memcpy(xc2->valpos_mem, xc->valpos_mem, xc->maxhandle * 4 * sizeof(uint32_t));
 
         /* curval mem is updated in the thread */
 #ifdef FST_REMOVE_DUPLICATE_VC
-        xc2->curval_mem = malloc(xc->maxvalpos);
+        xc2->curval_mem = (unsigned char *)malloc(xc->maxvalpos);
         memcpy(xc2->curval_mem, xc->curval_mem, xc->maxvalpos);
 #endif
 
-        xc->vchg_mem = malloc(xc->vchg_alloc_siz);
+        xc->vchg_mem = (unsigned char *)malloc(xc->vchg_alloc_siz);
         xc->vchg_mem[0] = '!';
         xc->vchg_siz = 1;
 
@@ -1817,7 +1866,15 @@ if(xc->parallel_enabled)
         xc->section_header_only = 0;
         xc->secnum++;
 
+	while (xc->in_pthread) 
+		{ 
+		pthread_mutex_lock(&xc->mutex); 
+		pthread_mutex_unlock(&xc->mutex); 
+		};
+
         pthread_mutex_lock(&xc->mutex);
+	xc->in_pthread = 1;
+        pthread_mutex_unlock(&xc->mutex);
 
         pthread_create(&xc->thread, &xc->thread_attr, fstWriterFlushContextPrivate1, xc2);
         }
@@ -1869,8 +1926,8 @@ if(xc)
 
 if(xc && !xc->already_in_close && !xc->already_in_flush)
         {
-        unsigned char *tmem;
-        off_t fixup_offs, tlen, hlen;
+        unsigned char *tmem = NULL;
+        fst_off_t fixup_offs, tlen, hlen;
 
         xc->already_in_close = 1; /* never need to zero this out as it is freed at bottom */
 
@@ -1885,7 +1942,7 @@ if(xc && !xc->already_in_close && !xc->already_in_flush)
                 xc->skip_writing_section_hdr = 1;
                 if(!xc->size_limit_locked)
                         {
-                        if(xc->is_initial_time) /* simulation time never advanced so mock up the changes as time zero ones */
+                        if(FST_UNLIKELY(xc->is_initial_time)) /* simulation time never advanced so mock up the changes as time zero ones */
                                 {
                                 fstHandle dupe_idx;
 
@@ -1899,22 +1956,38 @@ if(xc && !xc->already_in_close && !xc->already_in_flush)
 #ifdef FST_WRITER_PARALLEL
                         pthread_mutex_lock(&xc->mutex);
                         pthread_mutex_unlock(&xc->mutex);
+
+			while (xc->in_pthread) 
+				{ 
+				pthread_mutex_lock(&xc->mutex); 
+				pthread_mutex_unlock(&xc->mutex); 
+				};
 #endif
                         }
                 }
         fstDestroyMmaps(xc, 1);
+	if(xc->outval_mem)
+		{
+		free(xc->outval_mem); xc->outval_mem = NULL;
+		xc->outval_alloc_siz = 0;
+		}
 
         /* write out geom section */
         fflush(xc->geom_handle);
         tlen = ftello(xc->geom_handle);
-        tmem = fstMmap(NULL, tlen, PROT_READ|PROT_WRITE, MAP_SHARED, fileno(xc->geom_handle), 0);
+	errno = 0;
+	if(tlen)
+		{
+	        fstWriterMmapSanity(tmem = (unsigned char *)fstMmap(NULL, tlen, PROT_READ|PROT_WRITE, MAP_SHARED, fileno(xc->geom_handle), 0), __FILE__, __LINE__, "tmem");
+		}
+
         if(tmem)
                 {
                 unsigned long destlen = tlen;
-                unsigned char *dmem = malloc(compressBound(destlen));
+                unsigned char *dmem = (unsigned char *)malloc(compressBound(destlen));
                 int rc = compress2(dmem, &destlen, tmem, tlen, 9);
 
-                if((rc != Z_OK) || (((off_t)destlen) > tlen))
+                if((rc != Z_OK) || (((fst_off_t)destlen) > tlen))
                         {
                         destlen = tlen;
                         }
@@ -1925,7 +1998,7 @@ if(xc && !xc->already_in_close && !xc->already_in_flush)
                 fstWriterUint64(xc->handle, tlen);              /* uncompressed */
                                                                 /* compressed len is section length - 24 */
                 fstWriterUint64(xc->handle, xc->maxhandle);     /* maxhandle */
-                fstFwrite((((off_t)destlen) != tlen) ? dmem : tmem, destlen, 1, xc->handle);
+                fstFwrite((((fst_off_t)destlen) != tlen) ? dmem : tmem, destlen, 1, xc->handle);
                 fflush(xc->handle);
 
                 fstWriterFseeko(xc, xc->handle, fixup_offs, SEEK_SET);
@@ -1941,7 +2014,7 @@ if(xc && !xc->already_in_close && !xc->already_in_flush)
         if(xc->num_blackouts)
                 {
                 uint64_t cur_bl = 0;
-                off_t bpos, eos;
+                fst_off_t bpos, eos;
                 uint32_t i;
 
                 fixup_offs = ftello(xc->handle);
@@ -1974,12 +2047,13 @@ if(xc && !xc->already_in_close && !xc->already_in_flush)
 
         if(xc->compress_hier)
                 {
-                off_t hl, eos;
+                fst_off_t hl, eos;
                 gzFile zhandle;
                 int zfd;
                 int fourpack_duo = 0;
 #ifndef __MINGW32__
-                char *fnam = malloc(strlen(xc->filename) + 5 + 1);
+		int fnam_len = strlen(xc->filename) + 5 + 1;
+                char *fnam = (char *)malloc(fnam_len);
 #endif
 
                 fixup_offs = ftello(xc->handle);
@@ -1990,7 +2064,7 @@ if(xc && !xc->already_in_close && !xc->already_in_flush)
 
                 if(!xc->fourpack)
                         {
-                        unsigned char *mem = malloc(FST_GZIO_LEN);
+                        unsigned char *mem = (unsigned char *)malloc(FST_GZIO_LEN);
                         zfd = dup(fileno(xc->handle));
                         fflush(xc->handle);
                         zhandle = gzdopen(zfd, "wb4");
@@ -2015,14 +2089,18 @@ if(xc && !xc->already_in_close && !xc->already_in_flush)
                         {
                         int lz4_maxlen;
                         unsigned char *mem;
-                        unsigned char *hmem;
+                        unsigned char *hmem = NULL;
                         int packed_len;
 
                         fflush(xc->handle);
 
                         lz4_maxlen = LZ4_compressBound(xc->hier_file_len);
-                        mem = malloc(lz4_maxlen);
-                        hmem = fstMmap(NULL, xc->hier_file_len, PROT_READ|PROT_WRITE, MAP_SHARED, fileno(xc->hier_handle), 0);
+                        mem = (unsigned char *)malloc(lz4_maxlen);
+			errno = 0;
+			if(xc->hier_file_len)
+				{
+	                        fstWriterMmapSanity(hmem = (unsigned char *)fstMmap(NULL, xc->hier_file_len, PROT_READ|PROT_WRITE, MAP_SHARED, fileno(xc->hier_handle), 0), __FILE__, __LINE__, "hmem");
+				}
                         packed_len = LZ4_compress((char *)hmem, (char *)mem, xc->hier_file_len);
                         fstMunmap(hmem, xc->hier_file_len);
 
@@ -2035,7 +2113,7 @@ if(xc && !xc->already_in_close && !xc->already_in_flush)
                                 int packed_len_duo;
 
                                 lz4_maxlen_duo = LZ4_compressBound(packed_len);
-                                mem_duo = malloc(lz4_maxlen_duo);
+                                mem_duo = (unsigned char *)malloc(lz4_maxlen_duo);
                                 packed_len_duo = LZ4_compress((char *)mem, (char *)mem_duo, packed_len);
 
                                 fstWriterVarint(xc->handle, packed_len); /* 1st round compressed length */
@@ -2065,7 +2143,7 @@ if(xc && !xc->already_in_close && !xc->already_in_flush)
                 fflush(xc->handle);
 
 #ifndef __MINGW32__
-                sprintf(fnam, "%s.hier", xc->filename);
+                snprintf(fnam, fnam_len, "%s.hier", xc->filename);
                 unlink(fnam);
                 free(fnam);
 #endif
@@ -2093,9 +2171,9 @@ if(xc && !xc->already_in_close && !xc->already_in_flush)
                 if(xc->repack_on_close)
                         {
                         FILE *fp;
-                        off_t offpnt, uclen;
+                        fst_off_t offpnt, uclen;
                         int flen = strlen(xc->filename);
-                        char *hf = calloc(1, flen + 5);
+                        char *hf = (char *)calloc(1, flen + 5);
 
                         strcpy(hf, xc->filename);
                         strcpy(hf+flen, ".pak");
@@ -2103,7 +2181,7 @@ if(xc && !xc->already_in_close && !xc->already_in_flush)
 
                         if(fp)
                                 {
-                                void *dsth;
+                                gzFile dsth;
                                 int zfd;
                                 char gz_membuf[FST_GZIO_LEN];
 
@@ -2159,7 +2237,7 @@ if(xc && !xc->already_in_close && !xc->already_in_flush)
 #ifdef __MINGW32__
         {
         int flen = strlen(xc->filename);
-        char *hf = calloc(1, flen + 6);
+        char *hf = (char *)calloc(1, flen + 6);
         strcpy(hf, xc->filename);
 
         if(xc->compress_hier)
@@ -2200,7 +2278,7 @@ struct fstWriterContext *xc = (struct fstWriterContext *)ctx;
 if(xc)
         {
         char s[FST_HDR_DATE_SIZE];
-        off_t fpos = ftello(xc->handle);
+        fst_off_t fpos = ftello(xc->handle);
         int len = strlen(dat);
 
         fstWriterFseeko(xc, xc->handle, FST_HDR_OFFS_DATE, SEEK_SET);
@@ -2219,7 +2297,7 @@ struct fstWriterContext *xc = (struct fstWriterContext *)ctx;
 if(xc && vers)
         {
         char s[FST_HDR_SIM_VERSION_SIZE];
-        off_t fpos = ftello(xc->handle);
+        fst_off_t fpos = ftello(xc->handle);
         int len = strlen(vers);
 
         fstWriterFseeko(xc, xc->handle, FST_HDR_OFFS_SIM_VERSION, SEEK_SET);
@@ -2239,7 +2317,7 @@ if(xc)
         {
         if(/*(filetype >= FST_FT_MIN) &&*/ (filetype <= FST_FT_MAX))
                 {
-                off_t fpos = ftello(xc->handle);
+                fst_off_t fpos = ftello(xc->handle);
 
                 xc->filetype = filetype;
 
@@ -2302,7 +2380,7 @@ if(xc && path && path[0])
         const unsigned char *path2 = (const unsigned char *)path;
 	PPvoid_t pv;
 #else
-        char *path2 = alloca(slen + 1); /* judy lacks const qualifier in its JudyHSIns definition */
+        char *path2 = (char *)alloca(slen + 1); /* judy lacks const qualifier in its JudyHSIns definition */
 	PPvoid_t pv;
         strcpy(path2, path);
 #endif
@@ -2380,7 +2458,7 @@ void fstWriterSetTimescale(void *ctx, int ts)
 struct fstWriterContext *xc = (struct fstWriterContext *)ctx;
 if(xc)
         {
-        off_t fpos = ftello(xc->handle);
+        fst_off_t fpos = ftello(xc->handle);
         fstWriterFseeko(xc, xc->handle, FST_HDR_OFFS_TIMESCALE, SEEK_SET);
         fputc(ts & 255, xc->handle);
         fflush(xc->handle);
@@ -2438,7 +2516,7 @@ void fstWriterSetTimezero(void *ctx, int64_t tim)
 struct fstWriterContext *xc = (struct fstWriterContext *)ctx;
 if(xc)
         {
-        off_t fpos = ftello(xc->handle);
+        fst_off_t fpos = ftello(xc->handle);
         fstWriterFseeko(xc, xc->handle, FST_HDR_OFFS_TIMEZERO, SEEK_SET);
         fstWriterUint64(xc->handle, (xc->timezero = tim));
         fflush(xc->handle);
@@ -2478,7 +2556,7 @@ if(xc)
 #ifndef FST_WRITER_PARALLEL
         if(xc->parallel_enabled)
                 {
-                fprintf(stderr, "ERROR: fstWriterSetParallelMode(), FST_WRITER_PARALLEL not enabled during compile, exiting.\n");
+                fprintf(stderr, FST_APIMESS "fstWriterSetParallelMode(), FST_WRITER_PARALLEL not enabled during compile, exiting.\n");
                 exit(255);
                 }
 #endif
@@ -2585,7 +2663,7 @@ if(xc && nam)
                         xc->vchg_alloc_siz = xc->fst_break_size + xc->fst_break_add_size;
                         if(xc->vchg_mem)
                                 {
-                                xc->vchg_mem = realloc(xc->vchg_mem, xc->vchg_alloc_siz);
+                                xc->vchg_mem = (unsigned char *)realloc(xc->vchg_mem, xc->vchg_alloc_siz);
                                 }
                         }
                 }
@@ -2723,6 +2801,111 @@ if(xc)
 }
 
 
+fstEnumHandle fstWriterCreateEnumTable(void *ctx, const char *name, uint32_t elem_count, unsigned int min_valbits, const char **literal_arr, const char **val_arr)
+{
+fstEnumHandle handle = 0;
+unsigned int *literal_lens = NULL;
+unsigned int *val_lens = NULL;
+int lit_len_tot = 0;
+int val_len_tot = 0;
+int name_len;
+char elem_count_buf[16];
+int elem_count_len;
+int total_len;
+int pos = 0;
+char *attr_str = NULL;
+
+if(ctx && name && literal_arr && val_arr && (elem_count != 0))
+	{
+	struct fstWriterContext *xc = (struct fstWriterContext *)ctx;
+
+	uint32_t i;
+
+	name_len = strlen(name);
+	elem_count_len = snprintf(elem_count_buf, 16, "%" PRIu32, elem_count);
+
+	literal_lens = (unsigned int *)calloc(elem_count, sizeof(unsigned int));
+	val_lens = (unsigned int *)calloc(elem_count, sizeof(unsigned int));
+
+	for(i=0;i<elem_count;i++)
+		{
+		literal_lens[i] = strlen(literal_arr[i]);
+		lit_len_tot += fstUtilityBinToEscConvertedLen((unsigned char*)literal_arr[i], literal_lens[i]);
+
+		val_lens[i] =  strlen(val_arr[i]);
+		val_len_tot += fstUtilityBinToEscConvertedLen((unsigned char*)val_arr[i], val_lens[i]);
+
+		if(min_valbits > 0)
+			{
+			if(val_lens[i] < min_valbits)
+				{
+				val_len_tot += (min_valbits - val_lens[i]); /* additional converted len is same for '0' character */
+				}
+			}
+		}
+
+	total_len = name_len + 1 + elem_count_len + 1 + lit_len_tot + elem_count + val_len_tot + elem_count;
+
+	attr_str = (char*)malloc(total_len);
+	pos = 0;
+
+	memcpy(attr_str+pos, name, name_len);
+	pos += name_len;
+	attr_str[pos++] = ' ';
+
+	memcpy(attr_str+pos, elem_count_buf, elem_count_len);
+	pos += elem_count_len;
+	attr_str[pos++] = ' ';
+
+	for(i=0;i<elem_count;i++)
+		{
+		pos += fstUtilityBinToEsc((unsigned char*)attr_str+pos, (unsigned char*)literal_arr[i], literal_lens[i]);
+		attr_str[pos++] = ' ';
+		}
+
+	for(i=0;i<elem_count;i++)
+		{
+		if(min_valbits > 0)
+			{
+			if(val_lens[i] < min_valbits)
+				{
+				memset(attr_str+pos, '0', min_valbits - val_lens[i]);
+				pos += (min_valbits - val_lens[i]);
+				}
+			}
+
+		pos += fstUtilityBinToEsc((unsigned char*)attr_str+pos, (unsigned char*)val_arr[i], val_lens[i]);
+		attr_str[pos++] = ' ';
+		}
+
+	attr_str[pos-1] = 0;
+
+#ifdef FST_DEBUG
+	fprintf(stderr, FST_APIMESS "fstWriterCreateEnumTable() total_len: %d, pos: %d\n", total_len, pos);
+	fprintf(stderr, FST_APIMESS "*%s*\n", attr_str);
+#endif
+
+	fstWriterSetAttrBegin(xc, FST_AT_MISC, FST_MT_ENUMTABLE, attr_str, handle = ++xc->max_enumhandle);
+
+	free(attr_str);
+	free(val_lens);
+	free(literal_lens);
+	}
+
+return(handle);
+}
+
+
+void fstWriterEmitEnumTableRef(void *ctx, fstEnumHandle handle)
+{
+struct fstWriterContext *xc = (struct fstWriterContext *)ctx;
+if(xc && handle)
+	{
+	fstWriterSetAttrBegin(xc, FST_AT_MISC, FST_MT_ENUMTABLE, NULL, handle);
+        }
+}
+
+
 /*
  * value and time change emission
  */
@@ -2733,12 +2916,12 @@ const unsigned char *buf = (const unsigned char *)val;
 uint32_t offs;
 int len;
 
-if((xc) && (handle <= xc->maxhandle))
+if(FST_LIKELY((xc) && (handle <= xc->maxhandle)))
         {
         uint32_t fpos;
         uint32_t *vm4ip;
 
-        if(!xc->valpos_mem)
+        if(FST_UNLIKELY(!xc->valpos_mem))
                 {
                 xc->vc_emitted = 1;
                 fstWriterCreateMmaps(xc);
@@ -2748,19 +2931,19 @@ if((xc) && (handle <= xc->maxhandle))
         vm4ip = &(xc->valpos_mem[4*handle]);
 
         len  = vm4ip[1];
-        if(len) /* len of zero = variable length, use fstWriterEmitVariableLengthValueChange */
+        if(FST_LIKELY(len)) /* len of zero = variable length, use fstWriterEmitVariableLengthValueChange */
                 {
-                if(!xc->is_initial_time)
+                if(FST_LIKELY(!xc->is_initial_time))
                         {
                         fpos = xc->vchg_siz;
 
-                        if((fpos + len + 10) > xc->vchg_alloc_siz)
+                        if(FST_UNLIKELY((fpos + len + 10) > xc->vchg_alloc_siz))
                                 {
                                 xc->vchg_alloc_siz += (xc->fst_break_add_size + len); /* +len added in the case of extremely long vectors and small break add sizes */
-                                xc->vchg_mem = realloc(xc->vchg_mem, xc->vchg_alloc_siz);
-                                if(!xc->vchg_mem)
+                                xc->vchg_mem = (unsigned char *)realloc(xc->vchg_mem, xc->vchg_alloc_siz);
+                                if(FST_UNLIKELY(!xc->vchg_mem))
                                         {
-                                        fprintf(stderr, "FATAL ERROR, could not realloc() in fstWriterEmitValueChange, exiting.\n");
+                                        fprintf(stderr, FST_APIMESS "Could not realloc() in fstWriterEmitValueChange, exiting.\n");
                                         exit(255);
                                         }
                                 }
@@ -2843,18 +3026,139 @@ if((xc) && (handle <= xc->maxhandle))
         }
 }
 
+void fstWriterEmitValueChange32(void *ctx, fstHandle handle,
+                                uint32_t bits, uint32_t val) {
+        char buf[32];
+        char *s = buf;
+        uint32_t i;
+        for (i = 0; i < bits; ++i)
+        {
+                *s++ = '0' + ((val >> (bits - i - 1)) & 1);
+        }
+        fstWriterEmitValueChange(ctx, handle, buf);
+}
+void fstWriterEmitValueChange64(void *ctx, fstHandle handle,
+                                uint32_t bits, uint64_t val) {
+        char buf[64];
+        char *s = buf;
+        uint32_t i;
+        for (i = 0; i < bits; ++i)
+        {
+                *s++ = '0' + ((val >> (bits - i - 1)) & 1);
+        }
+        fstWriterEmitValueChange(ctx, handle, buf);
+}
+void fstWriterEmitValueChangeVec32(void *ctx, fstHandle handle,
+                                   uint32_t bits, const uint32_t *val) {
+        struct fstWriterContext *xc = (struct fstWriterContext *)ctx;
+        if (FST_UNLIKELY(bits <= 32))
+        {
+                fstWriterEmitValueChange32(ctx, handle, bits, val[0]);
+        }
+        else if(FST_LIKELY(xc))
+        {
+                int bq = bits / 32;
+                int br = bits & 31;
+                int i;
+                int w;
+                uint32_t v;
+                unsigned char* s;
+                if (FST_UNLIKELY(bits > xc->outval_alloc_siz))
+                {
+                        xc->outval_alloc_siz = bits*2 + 1;
+                        xc->outval_mem = (unsigned char*)realloc(xc->outval_mem, xc->outval_alloc_siz);
+                        if (FST_UNLIKELY(!xc->outval_mem))
+                        {
+                                fprintf(stderr,
+                                        FST_APIMESS "Could not realloc() in fstWriterEmitValueChangeVec32, exiting.\n");
+                                exit(255);
+                        }
+                }
+                s = xc->outval_mem;
+                {
+                        w = bq;
+                        v = val[w];
+                        for (i = 0; i < br; ++i)
+                        {
+                                *s++ = '0' + ((v >> (br - i - 1)) & 1);
+                        }
+                }
+                for (w = bq - 1; w >= 0; --w)
+                {
+                        v = val[w];
+                        for (i = (32 - 4); i >= 0; i -= 4) {
+                                s[0] = '0' + ((v >> (i + 3)) & 1);
+                                s[1] = '0' + ((v >> (i + 2)) & 1);
+                                s[2] = '0' + ((v >> (i + 1)) & 1);
+                                s[3] = '0' + ((v >> (i + 0)) & 1);
+                                s += 4;
+                        }
+                }
+                fstWriterEmitValueChange(ctx, handle, xc->outval_mem);
+        }
+}
+void fstWriterEmitValueChangeVec64(void *ctx, fstHandle handle,
+                                   uint32_t bits, const uint64_t *val) {
+        struct fstWriterContext *xc = (struct fstWriterContext *)ctx;
+        if (FST_UNLIKELY(bits <= 64))
+        {
+                fstWriterEmitValueChange64(ctx, handle, bits, val[0]);
+        }
+        else if(FST_LIKELY(xc))
+        {
+                int bq = bits / 64;
+                int br = bits & 63;
+                int i;
+                int w;
+                uint32_t v;
+                unsigned char* s;
+                if (FST_UNLIKELY(bits > xc->outval_alloc_siz))
+                {
+                        xc->outval_alloc_siz = bits*2 + 1;
+                        xc->outval_mem = (unsigned char*)realloc(xc->outval_mem, xc->outval_alloc_siz);
+                        if (FST_UNLIKELY(!xc->outval_mem))
+                        {
+                                fprintf(stderr,
+                                        FST_APIMESS "Could not realloc() in fstWriterEmitValueChangeVec64, exiting.\n");
+                                exit(255);
+                        }
+                }
+                s = xc->outval_mem;
+                {
+                        w = bq;
+                        v = val[w];
+                        for (i = 0; i < br; ++i)
+                        {
+                                *s++ = '0' + ((v >> (br - i - 1)) & 1);
+                        }
+                }
+                for (w = bq - 1; w >= 0; --w) {
+                        v = val[w];
+                        for (i = (64 - 4); i >= 0; i -= 4)
+                        {
+                                s[0] = '0' + ((v >> (i + 3)) & 1);
+                                s[1] = '0' + ((v >> (i + 2)) & 1);
+                                s[2] = '0' + ((v >> (i + 1)) & 1);
+                                s[3] = '0' + ((v >> (i + 0)) & 1);
+                                s += 4;
+                        }
+                }
+                fstWriterEmitValueChange(ctx, handle, xc->outval_mem);
+        }
+}
+
 
 void fstWriterEmitVariableLengthValueChange(void *ctx, fstHandle handle, const void *val, uint32_t len)
 {
 struct fstWriterContext *xc = (struct fstWriterContext *)ctx;
 const unsigned char *buf = (const unsigned char *)val;
 
-if((xc) && (handle <= xc->maxhandle))
+if(FST_LIKELY((xc) && (handle <= xc->maxhandle)))
         {
         uint32_t fpos;
         uint32_t *vm4ip;
 
-        if(!xc->valpos_mem)
+        if(FST_UNLIKELY(!xc->valpos_mem))
                 {
                 xc->vc_emitted = 1;
                 fstWriterCreateMmaps(xc);
@@ -2864,17 +3168,17 @@ if((xc) && (handle <= xc->maxhandle))
         vm4ip = &(xc->valpos_mem[4*handle]);
 
         /* there is no initial time dump for variable length value changes */
-        if(!vm4ip[1]) /* len of zero = variable length */
+        if(FST_LIKELY(!vm4ip[1])) /* len of zero = variable length */
                 {
                 fpos = xc->vchg_siz;
 
-                if((fpos + len + 10 + 5) > xc->vchg_alloc_siz)
+                if(FST_UNLIKELY((fpos + len + 10 + 5) > xc->vchg_alloc_siz))
                         {
                         xc->vchg_alloc_siz += (xc->fst_break_add_size + len + 5); /* +len added in the case of extremely long vectors and small break add sizes */
-                        xc->vchg_mem = realloc(xc->vchg_mem, xc->vchg_alloc_siz);
-                        if(!xc->vchg_mem)
+                        xc->vchg_mem = (unsigned char *)realloc(xc->vchg_mem, xc->vchg_alloc_siz);
+                        if(FST_UNLIKELY(!xc->vchg_mem))
                                 {
-                                fprintf(stderr, "FATAL ERROR, could not realloc() in fstWriterEmitVariableLengthValueChange, exiting.\n");
+                                fprintf(stderr, FST_APIMESS "Could not realloc() in fstWriterEmitVariableLengthValueChange, exiting.\n");
                                 exit(255);
                                 }
                         }
@@ -2894,7 +3198,7 @@ unsigned int i;
 int skip = 0;
 if(xc)
         {
-        if(xc->is_initial_time)
+        if(FST_UNLIKELY(xc->is_initial_time))
                 {
                 if(xc->size_limit_locked)       /* this resets xc->is_initial_time to one */
                         {
@@ -2948,7 +3252,7 @@ struct fstWriterContext *xc = (struct fstWriterContext *)ctx;
 
 if(xc)
         {
-        struct fstBlackoutChain *b = calloc(1, sizeof(struct fstBlackoutChain));
+        struct fstBlackoutChain *b = (struct fstBlackoutChain *)calloc(1, sizeof(struct fstBlackoutChain));
 
         b->tim = xc->curtime;
         b->active = (enable != 0);
@@ -3054,7 +3358,7 @@ char date[FST_HDR_DATE_SIZE + 1];
 int64_t timezero;
 
 char *filename, *filename_unpacked;
-off_t hier_pos;
+fst_off_t hier_pos;
 
 uint32_t num_blackouts;
 uint64_t *blackout_times;
@@ -3069,10 +3373,10 @@ uint64_t *rvat_time_table;
 uint64_t rvat_beg_tim, rvat_end_tim;
 unsigned char *rvat_frame_data;
 uint64_t rvat_frame_maxhandle;
-off_t *rvat_chain_table;
+fst_off_t *rvat_chain_table;
 uint32_t *rvat_chain_table_lengths;
 uint64_t rvat_vc_maxhandle;
-off_t rvat_vc_start;
+fst_off_t rvat_vc_start;
 uint32_t *rvat_sig_offs;
 int rvat_packtype;
 
@@ -3095,6 +3399,7 @@ int flat_hier_alloc_len;
 unsigned do_rewind : 1;
 char str_scope_nam[FST_ID_NAM_SIZ+1];
 char str_scope_comp[FST_ID_NAM_SIZ+1];
+char *str_scope_attr;
 
 unsigned fseek_failed : 1;
 
@@ -3111,7 +3416,7 @@ char *fh_nam;
 };
 
 
-int fstReaderFseeko(struct fstReaderContext *xc, FILE *stream, off_t offset, int whence)
+int fstReaderFseeko(struct fstReaderContext *xc, FILE *stream, fst_off_t offset, int whence)
 {
 int rc = fseeko(stream, offset, whence);
 
@@ -3119,7 +3424,7 @@ if(rc<0)
         {
         xc->fseek_failed = 1;
 #ifdef FST_DEBUG
-        fprintf(stderr, "Seek to #%"PRId64" (whence = %d) failed!\n", offset, whence);
+        fprintf(stderr, FST_APIMESS "Seek to #%" PRId64 " (whence = %d) failed!\n", offset, whence);
         perror("Why");
 #endif
         }
@@ -3247,12 +3552,12 @@ const char *fstReaderPushScope(void *ctx, const char *nam, void *user_info)
 struct fstReaderContext *xc = (struct fstReaderContext *)ctx;
 if(xc)
         {
-        struct fstCurrHier *ch = malloc(sizeof(struct fstCurrHier));
+        struct fstCurrHier *ch = (struct fstCurrHier *)malloc(sizeof(struct fstCurrHier));
         int chl = xc->curr_hier ? xc->curr_hier->len : 0;
         int len = chl + 1 + strlen(nam);
         if(len >= xc->flat_hier_alloc_len)
                 {
-                xc->curr_flat_hier_nam = xc->curr_flat_hier_nam ? realloc(xc->curr_flat_hier_nam, len+1) : malloc(len+1);
+                xc->curr_flat_hier_nam = xc->curr_flat_hier_nam ? (char *)realloc(xc->curr_flat_hier_nam, len+1) : (char *)malloc(len+1);
                 }
 
         if(chl)
@@ -3472,7 +3777,7 @@ return(xc ? xc->date : NULL);
 int fstReaderGetFileType(void *ctx)
 {
 struct fstReaderContext *xc = (struct fstReaderContext *)ctx;
-return(xc ? xc->filetype : FST_FT_VERILOG);
+return(xc ? (int)xc->filetype : (int)FST_FT_VERILOG);
 }
 
 
@@ -3604,11 +3909,12 @@ int pass_status = 1;
 
 if(!xc->fh)
         {
-        off_t offs_cache = ftello(xc->f);
-        char *fnam = malloc(strlen(xc->filename) + 6 + 16 + 32 + 1);
-        unsigned char *mem = malloc(FST_GZIO_LEN);
-        off_t hl, uclen;
-        off_t clen = 0;
+        fst_off_t offs_cache = ftello(xc->f);
+	int fnam_len = strlen(xc->filename) + 6 + 16 + 32 + 1;
+        char *fnam = (char *)malloc(fnam_len);
+        unsigned char *mem = (unsigned char *)malloc(FST_GZIO_LEN);
+        fst_off_t hl, uclen;
+        fst_off_t clen = 0;
         gzFile zhandle = NULL;
         int zfd;
         int htyp = FST_BL_SKIP;
@@ -3624,7 +3930,7 @@ if(!xc->fh)
                 htyp = xc->contains_hier_section_lz4duo ? FST_BL_HIER_LZ4DUO : FST_BL_HIER_LZ4;
                 }
 
-        sprintf(fnam, "%s.hier_%d_%p", xc->filename, getpid(), (void *)xc);
+        snprintf(fnam, fnam_len, "%s.hier_%d_%p", xc->filename, getpid(), (void *)xc);
         fstReaderFseeko(xc, xc->f, xc->hier_pos, SEEK_SET);
         uclen = fstReaderUint64(xc->f);
 #ifndef __MINGW32__
@@ -3703,8 +4009,8 @@ if(!xc->fh)
         else
         if(htyp == FST_BL_HIER_LZ4DUO)
                 {
-                unsigned char *lz4_cmem  = malloc(clen);
-                unsigned char *lz4_ucmem = malloc(uclen);
+                unsigned char *lz4_cmem  = (unsigned char *)malloc(clen);
+                unsigned char *lz4_ucmem = (unsigned char *)malloc(uclen);
                 unsigned char *lz4_ucmem2;
                 uint64_t uclen2;
                 int skiplen2 = 0;
@@ -3712,7 +4018,7 @@ if(!xc->fh)
                 fstFread(lz4_cmem, clen, 1, xc->f);
 
                 uclen2 = fstGetVarint64(lz4_cmem, &skiplen2);
-                lz4_ucmem2 = malloc(uclen2);
+                lz4_ucmem2 = (unsigned char *)malloc(uclen2);
                 pass_status = (uclen2 == (uint64_t)LZ4_decompress_safe_partial ((char *)lz4_cmem + skiplen2, (char *)lz4_ucmem2, clen - skiplen2, uclen2, uclen2));
                 if(pass_status)
                         {
@@ -3731,8 +4037,8 @@ if(!xc->fh)
         else
         if(htyp == FST_BL_HIER_LZ4)
                 {
-                unsigned char *lz4_cmem  = malloc(clen);
-                unsigned char *lz4_ucmem = malloc(uclen);
+                unsigned char *lz4_cmem  = (unsigned char *)malloc(clen);
+                unsigned char *lz4_ucmem = (unsigned char *)malloc(uclen);
 
                 fstFread(lz4_cmem, clen, 1, xc->f);
                 pass_status = (uclen == LZ4_decompress_safe_partial ((char *)lz4_cmem, (char *)lz4_ucmem, clen, uclen, uclen));
@@ -3748,6 +4054,10 @@ if(!xc->fh)
         else /* FST_BL_SKIP */
                 {
                 pass_status = 0;
+                if(xc->fh)
+                        {
+                        fclose(xc->fh); xc->fh = NULL; /* needed in case .hier file is missing and there are no hier sections */
+                        }
                 }
 
         free(mem);
@@ -3809,26 +4119,35 @@ if(xc->do_rewind)
 if(!(isfeof=feof(xc->fh)))
         {
         int tag = fgetc(xc->fh);
+	int cl;
         switch(tag)
                 {
                 case FST_ST_VCD_SCOPE:
                         xc->hier.htyp = FST_HT_SCOPE;
                         xc->hier.u.scope.typ = fgetc(xc->fh);
                         xc->hier.u.scope.name = pnt = xc->str_scope_nam;
+			cl = 0;
                         while((ch = fgetc(xc->fh)))
                                 {
-                                *(pnt++) = ch;
+				if(cl < FST_ID_NAM_SIZ)
+					{
+					pnt[cl++] = ch;
+					}
                                 }; /* scopename */
-                        *pnt = 0;
-                        xc->hier.u.scope.name_length = pnt - xc->hier.u.scope.name;
+                        pnt[cl] = 0;
+                        xc->hier.u.scope.name_length = cl;
 
                         xc->hier.u.scope.component = pnt = xc->str_scope_comp;
+			cl = 0;
                         while((ch = fgetc(xc->fh)))
                                 {
-                                *(pnt++) = ch;
+				if(cl < FST_ID_NAM_SIZ)
+					{
+					pnt[cl++] = ch;
+					}
                                 }; /* scopecomp */
-                        *pnt = 0;
-                        xc->hier.u.scope.component_length = pnt - xc->hier.u.scope.component;
+                        pnt[cl] = 0;
+                        xc->hier.u.scope.component_length = cl;
                         break;
 
                 case FST_ST_VCD_UPSCOPE:
@@ -3839,13 +4158,21 @@ if(!(isfeof=feof(xc->fh)))
                         xc->hier.htyp = FST_HT_ATTRBEGIN;
                         xc->hier.u.attr.typ = fgetc(xc->fh);
                         xc->hier.u.attr.subtype = fgetc(xc->fh);
-                        xc->hier.u.attr.name = pnt = xc->str_scope_nam;
+			if(!xc->str_scope_attr)
+				{
+				xc->str_scope_attr = (char *)calloc(1, FST_ID_NAM_ATTR_SIZ+1);
+				}
+                        xc->hier.u.attr.name = pnt = xc->str_scope_attr;
+			cl = 0;
                         while((ch = fgetc(xc->fh)))
                                 {
-                                *(pnt++) = ch;
-                                }; /* scopename */
-                        *pnt = 0;
-                        xc->hier.u.attr.name_length = pnt - xc->hier.u.scope.name;
+				if(cl < FST_ID_NAM_ATTR_SIZ)
+					{
+					pnt[cl++] = ch;
+					}
+                                }; /* attrname */
+			pnt[cl] = 0;
+                        xc->hier.u.attr.name_length = cl;
 
                         xc->hier.u.attr.arg = fstReaderVarint64(xc->fh);
 
@@ -3854,7 +4181,7 @@ if(!(isfeof=feof(xc->fh)))
                                 if((xc->hier.u.attr.subtype == FST_MT_SOURCESTEM)||(xc->hier.u.attr.subtype == FST_MT_SOURCEISTEM))
                                         {
                                         int sidx_skiplen_dummy = 0;
-                                        xc->hier.u.attr.arg_from_name = fstGetVarint64((unsigned char *)xc->str_scope_nam, &sidx_skiplen_dummy);
+                                        xc->hier.u.attr.arg_from_name = fstGetVarint64((unsigned char *)xc->str_scope_attr, &sidx_skiplen_dummy);
                                         }
                                 }
                         break;
@@ -3900,12 +4227,16 @@ if(!(isfeof=feof(xc->fh)))
                         xc->hier.u.var.typ = tag;
                         xc->hier.u.var.direction = fgetc(xc->fh);
                         xc->hier.u.var.name = pnt = xc->str_scope_nam;
+			cl = 0;
                         while((ch = fgetc(xc->fh)))
                                 {
-                                *(pnt++) = ch;
+				if(cl < FST_ID_NAM_SIZ)
+					{
+					pnt[cl++] = ch;
+					}
                                 }; /* varname */
-                        *pnt = 0;
-                        xc->hier.u.var.name_length = pnt - xc->hier.u.var.name;
+                        pnt[cl] = 0;
+                        xc->hier.u.var.name_length = cl;
                         xc->hier.u.var.length = fstReaderVarint32(xc->fh);
                         if(tag == FST_VT_VCD_PORT)
                                 {
@@ -3952,6 +4283,7 @@ unsigned int num_signal_dyn = 65536;
 int attrtype, subtype;
 uint64_t attrarg;
 fstHandle maxhandle_scanbuild;
+int cl;
 
 if(!xc) return(0);
 
@@ -3965,7 +4297,7 @@ if(!xc->fh)
                 }
         }
 
-str = malloc(FST_ID_NAM_ATTR_SIZ+1);
+str = (char *)malloc(FST_ID_NAM_ATTR_SIZ+1);
 
 if(fv)
         {
@@ -3974,40 +4306,40 @@ if(fv)
 
         fprintf(fv, "$date\n\t%s\n$end\n", xc->date);
         fprintf(fv, "$version\n\t%s\n$end\n", xc->version);
-        if(xc->timezero) fprintf(fv, "$timezero\n\t%"PRId64"\n$end\n", xc->timezero);
+        if(xc->timezero) fprintf(fv, "$timezero\n\t%" PRId64 "\n$end\n", xc->timezero);
 
         switch(xc->timescale)
                 {
                 case  2:        time_scale = 100;               time_dimension[0] = 0;   break;
-                case  1:        time_scale = 10;
+                case  1:        time_scale = 10; /* fallthrough */
                 case  0:                                        time_dimension[0] = 0;   break;
 
                 case -1:        time_scale = 100;               time_dimension[0] = 'm'; break;
-                case -2:        time_scale = 10;
+                case -2:        time_scale = 10; /* fallthrough */
                 case -3:                                        time_dimension[0] = 'm'; break;
 
                 case -4:        time_scale = 100;               time_dimension[0] = 'u'; break;
-                case -5:        time_scale = 10;
+                case -5:        time_scale = 10; /* fallthrough */
                 case -6:                                        time_dimension[0] = 'u'; break;
 
                 case -10:       time_scale = 100;               time_dimension[0] = 'p'; break;
-                case -11:       time_scale = 10;
+                case -11:       time_scale = 10; /* fallthrough */
                 case -12:                                       time_dimension[0] = 'p'; break;
 
                 case -13:       time_scale = 100;               time_dimension[0] = 'f'; break;
-                case -14:       time_scale = 10;
+                case -14:       time_scale = 10; /* fallthrough */
                 case -15:                                       time_dimension[0] = 'f'; break;
 
                 case -16:       time_scale = 100;               time_dimension[0] = 'a'; break;
-                case -17:       time_scale = 10;
+                case -17:       time_scale = 10; /* fallthrough */
                 case -18:                                       time_dimension[0] = 'a'; break;
 
                 case -19:       time_scale = 100;               time_dimension[0] = 'z'; break;
-                case -20:       time_scale = 10;
+                case -20:       time_scale = 10; /* fallthrough */
                 case -21:                                       time_dimension[0] = 'z'; break;
 
                 case -7:        time_scale = 100;               time_dimension[0] = 'n'; break;
-                case -8:        time_scale = 10;
+                case -8:        time_scale = 10; /* fallthrough */
                 case -9:
                 default:                                        time_dimension[0] = 'n'; break;
                 }
@@ -4019,10 +4351,10 @@ xc->maxhandle = 0;
 xc->num_alias = 0;
 
 free(xc->signal_lens);
-xc->signal_lens = malloc(num_signal_dyn*sizeof(uint32_t));
+xc->signal_lens = (uint32_t *)malloc(num_signal_dyn*sizeof(uint32_t));
 
 free(xc->signal_typs);
-xc->signal_typs = malloc(num_signal_dyn*sizeof(unsigned char));
+xc->signal_typs = (unsigned char *)malloc(num_signal_dyn*sizeof(unsigned char));
 
 fstReaderFseeko(xc, xc->fh, 0, SEEK_SET);
 while(!feof(xc->fh))
@@ -4034,11 +4366,15 @@ while(!feof(xc->fh))
                         scopetype = fgetc(xc->fh);
                         if((scopetype < FST_ST_MIN) || (scopetype > FST_ST_MAX)) scopetype = FST_ST_VCD_MODULE;
                         pnt = str;
+			cl = 0;
                         while((ch = fgetc(xc->fh)))
                                 {
-                                *(pnt++) = ch;
+				if(cl < FST_ID_NAM_ATTR_SIZ)
+					{
+					pnt[cl++] = ch;
+					}
                                 }; /* scopename */
-                        *pnt = 0;
+                        pnt[cl] = 0;
                         while(fgetc(xc->fh)) { }; /* scopecomp */
 
                         if(fv) fprintf(fv, "$scope %s %s $end\n", modtypes[scopetype], str);
@@ -4052,11 +4388,15 @@ while(!feof(xc->fh))
                         attrtype = fgetc(xc->fh);
                         subtype = fgetc(xc->fh);
                         pnt = str;
+			cl = 0;
                         while((ch = fgetc(xc->fh)))
                                 {
-                                *(pnt++) = ch;
+				if(cl < FST_ID_NAM_ATTR_SIZ)
+					{
+					pnt[cl++] = ch;
+					}
                                 }; /* attrname */
-                        *pnt = 0;
+                        pnt[cl] = 0;
 
                         if(!str[0]) { strcpy(str, "\"\""); }
 
@@ -4067,13 +4407,13 @@ while(!feof(xc->fh))
                                 switch(attrtype)
                                         {
                                         case FST_AT_ARRAY:      if((subtype < FST_AR_NONE) || (subtype > FST_AR_MAX)) subtype = FST_AR_NONE;
-                                                                fprintf(fv, "$attrbegin %s %s %s %"PRId64" $end\n", attrtypes[attrtype], arraytypes[subtype], str, attrarg);
+                                                                fprintf(fv, "$attrbegin %s %s %s %" PRId64 " $end\n", attrtypes[attrtype], arraytypes[subtype], str, attrarg);
                                                                 break;
                                         case FST_AT_ENUM:       if((subtype < FST_EV_SV_INTEGER) || (subtype > FST_EV_MAX)) subtype = FST_EV_SV_INTEGER;
-                                                                fprintf(fv, "$attrbegin %s %s %s %"PRId64" $end\n", attrtypes[attrtype], enumvaluetypes[subtype], str, attrarg);
+                                                                fprintf(fv, "$attrbegin %s %s %s %" PRId64 " $end\n", attrtypes[attrtype], enumvaluetypes[subtype], str, attrarg);
                                                                 break;
                                         case FST_AT_PACK:       if((subtype < FST_PT_NONE) || (subtype > FST_PT_MAX)) subtype = FST_PT_NONE;
-                                                                fprintf(fv, "$attrbegin %s %s %s %"PRId64" $end\n", attrtypes[attrtype], packtypes[subtype], str, attrarg);
+                                                                fprintf(fv, "$attrbegin %s %s %s %" PRId64 " $end\n", attrtypes[attrtype], packtypes[subtype], str, attrarg);
                                                                 break;
                                         case FST_AT_MISC:
                                         default:                attrtype = FST_AT_MISC;
@@ -4088,11 +4428,11 @@ while(!feof(xc->fh))
                                                                                 int sidx_skiplen_dummy = 0;
                                                                                 uint64_t sidx = fstGetVarint64((unsigned char *)str, &sidx_skiplen_dummy);
 
-                                                                                fprintf(fv, "$attrbegin %s %02x %"PRId64" %"PRId64" $end\n", attrtypes[attrtype], subtype, sidx, attrarg);
+                                                                                fprintf(fv, "$attrbegin %s %02x %" PRId64 " %" PRId64 " $end\n", attrtypes[attrtype], subtype, sidx, attrarg);
                                                                                 }
                                                                                 else
                                                                                 {
-                                                                                fprintf(fv, "$attrbegin %s %02x %s %"PRId64" $end\n", attrtypes[attrtype], subtype, str, attrarg);
+                                                                                fprintf(fv, "$attrbegin %s %02x %s %" PRId64 " $end\n", attrtypes[attrtype], subtype, str, attrarg);
                                                                                 }
                                                                         }
                                                                 break;
@@ -4137,11 +4477,15 @@ while(!feof(xc->fh))
                         vartype = tag;
                         /* vardir = */ fgetc(xc->fh); /* unused in VCD reader, but need to advance read pointer */
                         pnt = str;
+			cl = 0;
                         while((ch = fgetc(xc->fh)))
                                 {
-                                *(pnt++) = ch;
+				if(cl < FST_ID_NAM_ATTR_SIZ)
+					{
+					pnt[cl++] = ch;
+					}
                                 }; /* varname */
-                        *pnt = 0;
+                        pnt[cl] = 0;
                         len = fstReaderVarint32(xc->fh);
                         alias = fstReaderVarint32(xc->fh);
 
@@ -4150,8 +4494,8 @@ while(!feof(xc->fh))
                                 if(xc->maxhandle == num_signal_dyn)
                                         {
                                         num_signal_dyn *= 2;
-                                        xc->signal_lens = realloc(xc->signal_lens, num_signal_dyn*sizeof(uint32_t));
-                                        xc->signal_typs = realloc(xc->signal_typs, num_signal_dyn*sizeof(unsigned char));
+                                        xc->signal_lens = (uint32_t *)realloc(xc->signal_lens, num_signal_dyn*sizeof(uint32_t));
+                                        xc->signal_typs = (unsigned char *)realloc(xc->signal_typs, num_signal_dyn*sizeof(unsigned char));
                                         }
                                 xc->signal_lens[xc->maxhandle] = len;
                                 xc->signal_typs[xc->maxhandle] = vartype;
@@ -4172,7 +4516,7 @@ while(!feof(xc->fh))
                                         char vcdid_buf[16];
                                         uint32_t modlen = (vartype != FST_VT_VCD_PORT) ? len : ((len - 2) / 3);
                                         fstVcdID(vcdid_buf, xc->maxhandle+1);
-                                        fprintf(fv, "$var %s %"PRIu32" %s %s $end\n", vartypes[vartype], modlen, vcdid_buf, str);
+                                        fprintf(fv, "$var %s %" PRIu32 " %s %s $end\n", vartypes[vartype], modlen, vcdid_buf, str);
                                         }
                                 xc->maxhandle++;
                                 }
@@ -4188,7 +4532,7 @@ while(!feof(xc->fh))
                                         char vcdid_buf[16];
                                         uint32_t modlen = (vartype != FST_VT_VCD_PORT) ? len : ((len - 2) / 3);
                                         fstVcdID(vcdid_buf, alias);
-                                        fprintf(fv, "$var %s %"PRIu32" %s %s $end\n", vartypes[vartype], modlen, vcdid_buf, str);
+                                        fprintf(fv, "$var %s %" PRIu32 " %s %s $end\n", vartypes[vartype], modlen, vcdid_buf, str);
                                         }
                                 xc->num_alias++;
                                 }
@@ -4203,14 +4547,14 @@ if(fv) fprintf(fv, "$enddefinitions $end\n");
 
 maxhandle_scanbuild = xc->maxhandle ? xc->maxhandle : 1; /*scan-build warning suppression, in reality we have at least one signal */
 
-xc->signal_lens = realloc(xc->signal_lens, maxhandle_scanbuild*sizeof(uint32_t));
-xc->signal_typs = realloc(xc->signal_typs, maxhandle_scanbuild*sizeof(unsigned char));
+xc->signal_lens = (uint32_t *)realloc(xc->signal_lens, maxhandle_scanbuild*sizeof(uint32_t));
+xc->signal_typs = (unsigned char *)realloc(xc->signal_typs, maxhandle_scanbuild*sizeof(unsigned char));
 
 free(xc->process_mask);
-xc->process_mask = calloc(1, (maxhandle_scanbuild+7)/8);
+xc->process_mask = (unsigned char *)calloc(1, (maxhandle_scanbuild+7)/8);
 
 free(xc->temp_signal_value_buf);
-xc->temp_signal_value_buf = malloc(xc->longest_signal_value_len + 1);
+xc->temp_signal_value_buf = (unsigned char *)malloc(xc->longest_signal_value_len + 1);
 
 xc->var_count = xc->maxhandle + xc->num_alias;
 
@@ -4224,8 +4568,8 @@ return(1);
  */
 int fstReaderInit(struct fstReaderContext *xc)
 {
-off_t blkpos = 0;
-off_t endfile;
+fst_off_t blkpos = 0;
+fst_off_t endfile;
 uint64_t seclen;
 int sectype;
 uint64_t vc_section_count_actual = 0;
@@ -4237,21 +4581,23 @@ sectype = fgetc(xc->f);
 if(sectype == FST_BL_ZWRAPPER)
         {
         FILE *fcomp;
-        off_t offpnt, uclen;
+        fst_off_t offpnt, uclen;
         char gz_membuf[FST_GZIO_LEN];
-        void *zhandle;
+        gzFile zhandle;
         int zfd;
         int flen = strlen(xc->filename);
         char *hf;
+	int hf_len;
 
         seclen = fstReaderUint64(xc->f);
         uclen = fstReaderUint64(xc->f);
 
         if(!seclen) return(0); /* not finished compressing, this is a failed read */
 
-        hf = calloc(1, flen + 16 + 32 + 1);
+	hf_len = flen + 16 + 32 + 1;
+        hf = (char *)calloc(1, hf_len);
 
-        sprintf(hf, "%s.upk_%d_%p", xc->filename, getpid(), (void *)xc);
+        snprintf(hf, hf_len, "%s.upk_%d_%p", xc->filename, getpid(), (void *)xc);
         fcomp = fopen(hf, "w+b");
         if(!fcomp)
                 {
@@ -4260,12 +4606,11 @@ if(sectype == FST_BL_ZWRAPPER)
                 if(!fcomp) { tmpfile_close(&fcomp, &xc->f_nam); return(0); }
                 }
 
-#if defined(FST_MACOSX)
+#if defined(FST_UNBUFFERED_IO)
         setvbuf(fcomp, (char *)NULL, _IONBF, 0);   /* keeps gzip from acting weird in tandem with fopen */
 #endif
 
 #ifdef __MINGW32__
-        setvbuf(fcomp, (char *)NULL, _IONBF, 0);   /* keeps gzip from acting weird in tandem with fopen */
         xc->filename_unpacked = hf;
 #else
         if(hf)
@@ -4412,7 +4757,7 @@ if(gzread_pass_status)
                                 {
                                 uint64_t clen = seclen - 24;
                                 uint64_t uclen = fstReaderUint64(xc->f);
-                                unsigned char *ucdata = malloc(uclen);
+                                unsigned char *ucdata = (unsigned char *)malloc(uclen);
                                 unsigned char *pnt = ucdata;
                                 unsigned int i;
 
@@ -4421,11 +4766,11 @@ if(gzread_pass_status)
                                 xc->longest_signal_value_len = 32; /* arbitrarily set at 32...this is much longer than an expanded double */
 
                                 free(xc->process_mask);
-                                xc->process_mask = calloc(1, (xc->maxhandle+7)/8);
+                                xc->process_mask = (unsigned char *)calloc(1, (xc->maxhandle+7)/8);
 
                                 if(clen != uclen)
                                         {
-                                        unsigned char *cdata = malloc(clen);
+                                        unsigned char *cdata = (unsigned char *)malloc(clen);
                                         unsigned long destlen = uclen;
                                         unsigned long sourcelen = clen;
                                         int rc;
@@ -4435,7 +4780,7 @@ if(gzread_pass_status)
 
                                         if(rc != Z_OK)
                                                 {
-                                                printf("geom uncompress rc = %d\n", rc);
+                                                fprintf(stderr, FST_APIMESS "fstReaderInit(), geom uncompress rc = %d, exiting.\n", rc);
                                                 exit(255);
                                                 }
 
@@ -4447,9 +4792,9 @@ if(gzread_pass_status)
                                         }
 
                                 free(xc->signal_lens);
-                                xc->signal_lens = malloc(sizeof(uint32_t) * xc->maxhandle);
+                                xc->signal_lens = (uint32_t *)malloc(sizeof(uint32_t) * xc->maxhandle);
                                 free(xc->signal_typs);
-                                xc->signal_typs = malloc(sizeof(unsigned char) * xc->maxhandle);
+                                xc->signal_typs = (unsigned char *)malloc(sizeof(unsigned char) * xc->maxhandle);
 
                                 for(i=0;i<xc->maxhandle;i++)
                                         {
@@ -4476,7 +4821,7 @@ if(gzread_pass_status)
                                         }
 
                                 free(xc->temp_signal_value_buf);
-                                xc->temp_signal_value_buf = malloc(xc->longest_signal_value_len + 1);
+                                xc->temp_signal_value_buf = (unsigned char *)malloc(xc->longest_signal_value_len + 1);
 
                                 free(ucdata);
                                 }
@@ -4505,9 +4850,9 @@ if(gzread_pass_status)
 
                         xc->num_blackouts = fstReaderVarint32(xc->f);
                         free(xc->blackout_times);
-                        xc->blackout_times = calloc(xc->num_blackouts, sizeof(uint64_t));
+                        xc->blackout_times = (uint64_t *)calloc(xc->num_blackouts, sizeof(uint64_t));
                         free(xc->blackout_activity);
-                        xc->blackout_activity = calloc(xc->num_blackouts, sizeof(unsigned char));
+                        xc->blackout_activity = (unsigned char *)calloc(xc->num_blackouts, sizeof(unsigned char));
 
                         for(i=0;i<xc->num_blackouts;i++)
                                 {
@@ -4542,7 +4887,7 @@ return(hdr_seen);
 
 void *fstReaderOpenForUtilitiesOnly(void)
 {
-struct fstReaderContext *xc = calloc(1, sizeof(struct fstReaderContext));
+struct fstReaderContext *xc = (struct fstReaderContext *)calloc(1, sizeof(struct fstReaderContext));
 
 return(xc);
 }
@@ -4550,7 +4895,7 @@ return(xc);
 
 void *fstReaderOpen(const char *nam)
 {
-struct fstReaderContext *xc = calloc(1, sizeof(struct fstReaderContext));
+struct fstReaderContext *xc = (struct fstReaderContext *)calloc(1, sizeof(struct fstReaderContext));
 
 if((!nam)||(!(xc->f=fopen(nam, "rb"))))
         {
@@ -4560,10 +4905,10 @@ if((!nam)||(!(xc->f=fopen(nam, "rb"))))
         else
         {
         int flen = strlen(nam);
-        char *hf = calloc(1, flen + 6);
+        char *hf = (char *)calloc(1, flen + 6);
         int rc;
 
-#if defined(__MINGW32__) || defined(FST_MACOSX)
+#if defined(FST_UNBUFFERED_IO)
         setvbuf(xc->f, (char *)NULL, _IONBF, 0);   /* keeps gzip from acting weird in tandem with fopen */
 #endif
 
@@ -4624,6 +4969,7 @@ if(xc)
         free(xc->signal_typs); xc->signal_typs = NULL;
         free(xc->signal_lens); xc->signal_lens = NULL;
         free(xc->filename); xc->filename = NULL;
+	free(xc->str_scope_attr); xc->str_scope_attr = NULL;
 
         if(xc->fh)
                 {
@@ -4670,15 +5016,13 @@ uint64_t *time_table = NULL;
 uint64_t tsec_nitems;
 unsigned int secnum = 0;
 int blocks_skipped = 0;
-off_t blkpos = 0;
+fst_off_t blkpos = 0;
 uint64_t seclen, beg_tim;
-#ifdef FST_DEBUG
 uint64_t end_tim;
-#endif
 uint64_t frame_uclen, frame_clen, frame_maxhandle, vc_maxhandle;
-off_t vc_start;
-off_t indx_pntr, indx_pos;
-off_t *chain_table = NULL;
+fst_off_t vc_start;
+fst_off_t indx_pntr, indx_pos;
+fst_off_t *chain_table = NULL;
 uint32_t *chain_table_lengths = NULL;
 unsigned char *chain_cmem;
 unsigned char *pnt;
@@ -4696,16 +5040,16 @@ uint32_t cur_blackout = 0;
 int packtype;
 unsigned char *mc_mem = NULL;
 uint32_t mc_mem_len; /* corresponds to largest value encountered in chain_table_lengths[i] */
+int dumpvars_state = 0;
 
 if(!xc) return(0);
 
-scatterptr = calloc(xc->maxhandle, sizeof(uint32_t));
-headptr = calloc(xc->maxhandle, sizeof(uint32_t));
-length_remaining = calloc(xc->maxhandle, sizeof(uint32_t));
+scatterptr = (uint32_t *)calloc(xc->maxhandle, sizeof(uint32_t));
+headptr = (uint32_t *)calloc(xc->maxhandle, sizeof(uint32_t));
+length_remaining = (uint32_t *)calloc(xc->maxhandle, sizeof(uint32_t));
 
 if(fv)
         {
-        fprintf(fv, "$dumpvars\n");
 #ifndef FST_WRITEX_DISABLE
         fflush(fv);
         setvbuf(fv, (char *) NULL, _IONBF, 0); /* even buffered IO is slow so disable it and use our own routines that don't need seeking */
@@ -4726,7 +5070,7 @@ for(;;)
         if((sectype == EOF) || (sectype == FST_BL_SKIP))
                 {
 #ifdef FST_DEBUG
-                fprintf(stderr, "<< EOF >>\n");
+                fprintf(stderr, FST_APIMESS "<< EOF >>\n");
 #endif
                 break;
                 }
@@ -4741,14 +5085,11 @@ for(;;)
         if(!seclen) break;
 
         beg_tim = fstReaderUint64(xc->f);
-#ifdef FST_DEBUG
-        end_tim =
-#endif
-        fstReaderUint64(xc->f);
+        end_tim = fstReaderUint64(xc->f);
 
         if(xc->limit_range_valid)
                 {
-                if(beg_tim < xc->limit_range_start)
+                if(end_tim < xc->limit_range_start)
                         {
                         blocks_skipped++;
                         blkpos += seclen;
@@ -4763,11 +5104,11 @@ for(;;)
 
 
         mem_required_for_traversal = fstReaderUint64(xc->f);
-        mem_for_traversal = malloc(mem_required_for_traversal + 66); /* add in potential fastlz overhead */
+        mem_for_traversal = (unsigned char *)malloc(mem_required_for_traversal + 66); /* add in potential fastlz overhead */
 #ifdef FST_DEBUG
-        fprintf(stderr, "sec: %u seclen: %d begtim: %d endtim: %d\n",
+        fprintf(stderr, FST_APIMESS "sec: %u seclen: %d begtim: %d endtim: %d\n",
                 secnum, (int)seclen, (int)beg_tim, (int)end_tim);
-        fprintf(stderr, "\tmem_required_for_traversal: %d\n", (int)mem_required_for_traversal);
+        fprintf(stderr, FST_APIMESS "mem_required_for_traversal: %d\n", (int)mem_required_for_traversal);
 #endif
         /* process time block */
         {
@@ -4785,27 +5126,27 @@ for(;;)
         tsec_clen = fstReaderUint64(xc->f);
         tsec_nitems = fstReaderUint64(xc->f);
 #ifdef FST_DEBUG
-        fprintf(stderr, "\ttime section unc: %d, com: %d (%d items)\n",
+        fprintf(stderr, FST_APIMESS "time section unc: %d, com: %d (%d items)\n",
                 (int)tsec_uclen, (int)tsec_clen, (int)tsec_nitems);
 #endif
         if(tsec_clen > seclen) break; /* corrupted tsec_clen: by definition it can't be larger than size of section */
-        ucdata = malloc(tsec_uclen);
+        ucdata = (unsigned char *)malloc(tsec_uclen);
         if(!ucdata) break; /* malloc fail as tsec_uclen out of range from corrupted file */
         destlen = tsec_uclen;
         sourcelen = tsec_clen;
 
-        fstReaderFseeko(xc, xc->f, -24 - ((off_t)tsec_clen), SEEK_CUR);
+        fstReaderFseeko(xc, xc->f, -24 - ((fst_off_t)tsec_clen), SEEK_CUR);
 
         if(tsec_uclen != tsec_clen)
                 {
-                cdata = malloc(tsec_clen);
+                cdata = (unsigned char *)malloc(tsec_clen);
                 fstFread(cdata, tsec_clen, 1, xc->f);
 
                 rc = uncompress(ucdata, &destlen, cdata, sourcelen);
 
                 if(rc != Z_OK)
                         {
-                        printf("tsec uncompress rc = %d\n", rc);
+                        fprintf(stderr, FST_APIMESS "fstReaderIterBlocks2(), tsec uncompress rc = %d, exiting.\n", rc);
                         exit(255);
                         }
 
@@ -4817,7 +5158,7 @@ for(;;)
                 }
 
         free(time_table);
-        time_table = calloc(tsec_nitems, sizeof(uint64_t));
+        time_table = (uint64_t *)calloc(tsec_nitems, sizeof(uint64_t));
         tpnt = ucdata;
         tpval = 0;
         for(ti=0;ti<tsec_nitems;ti++)
@@ -4828,7 +5169,7 @@ for(;;)
                 tpnt += skiplen;
                 }
 
-        tc_head = calloc(tsec_nitems /* scan-build */ ? tsec_nitems : 1, sizeof(uint32_t));
+        tc_head = (uint32_t *)calloc(tsec_nitems /* scan-build */ ? tsec_nitems : 1, sizeof(uint32_t));
         free(ucdata);
         }
 
@@ -4842,7 +5183,7 @@ for(;;)
                 {
                 if((beg_tim != time_table[0]) || (blocks_skipped))
                         {
-                        unsigned char *mu = malloc(frame_uclen);
+                        unsigned char *mu = (unsigned char *)malloc(frame_uclen);
                         uint32_t sig_offs = 0;
 
                         if(fv)
@@ -4852,14 +5193,16 @@ for(;;)
 
                                 if(beg_tim)
                                         {
-                                        wx_len = sprintf(wx_buf, "#%"PRIu64"\n", beg_tim);
+					if(dumpvars_state == 1) { wx_len = snprintf(wx_buf, 32, "$end\n"); fstWritex(xc, wx_buf, wx_len); dumpvars_state = 2; }
+                                        wx_len = snprintf(wx_buf, 32, "#%" PRIu64 "\n", beg_tim);
                                         fstWritex(xc, wx_buf, wx_len);
+					if(!dumpvars_state) { wx_len = snprintf(wx_buf, 32, "$dumpvars\n"); fstWritex(xc, wx_buf, wx_len); dumpvars_state = 1; }
                                         }
                                 if((xc->num_blackouts)&&(cur_blackout != xc->num_blackouts))
                                         {
                                         if(beg_tim == xc->blackout_times[cur_blackout])
                                                 {
-                                                wx_len = sprintf(wx_buf, "$dump%s $end\n", (xc->blackout_activity[cur_blackout++]) ? "on" : "off");
+                                                wx_len = snprintf(wx_buf, 32, "$dump%s $end\n", (xc->blackout_activity[cur_blackout++]) ? "on" : "off");
                                                 fstWritex(xc, wx_buf, wx_len);
                                                 }
                                         }
@@ -4871,7 +5214,7 @@ for(;;)
                                 }
                                 else
                                 {
-                                unsigned char *mc = malloc(frame_clen);
+                                unsigned char *mc = (unsigned char *)malloc(frame_clen);
                                 int rc;
 
                                 unsigned long destlen = frame_uclen;
@@ -4881,7 +5224,7 @@ for(;;)
                                 rc = uncompress(mu, &destlen, mc, sourcelen);
                                 if(rc != Z_OK)
                                         {
-                                        printf("rc: %d\n", rc);
+                                        fprintf(stderr, FST_APIMESS "fstReaderIterBlocks2(), frame uncompress rc: %d, exiting.\n", rc);
                                         exit(255);
                                         }
                                 free(mc);
@@ -4993,7 +5336,7 @@ for(;;)
                                                                                         clone_d[j] = srcdata[7-j];
                                                                                         }
                                                                                 }
-                                                                        sprintf((char *)xc->temp_signal_value_buf, "%.16g", d);
+                                                                        snprintf((char *)xc->temp_signal_value_buf, xc->longest_signal_value_len + 1, "%.16g", d);
                                                                         value_change_callback(user_callback_data_pointer, beg_tim, idx+1, xc->temp_signal_value_buf);
                                                                         }
                                                                 }
@@ -5021,7 +5364,7 @@ for(;;)
                                                                                 }
 
                                                                         fstVcdID(vcdid_buf, idx+1);
-                                                                        wx_len = sprintf(wx_buf, "r%.16g %s\n", d, vcdid_buf);
+                                                                        wx_len = snprintf(wx_buf, 64, "r%.16g %s\n", d, vcdid_buf);
                                                                         fstWritex(xc, wx_buf, wx_len);
                                                                         }
                                                                 }
@@ -5033,20 +5376,20 @@ for(;;)
                                 }
 
                         free(mu);
-                        fstReaderFseeko(xc, xc->f, -((off_t)frame_clen), SEEK_CUR);
+                        fstReaderFseeko(xc, xc->f, -((fst_off_t)frame_clen), SEEK_CUR);
                         }
                 }
 
-        fstReaderFseeko(xc, xc->f, (off_t)frame_clen, SEEK_CUR); /* skip past compressed data */
+        fstReaderFseeko(xc, xc->f, (fst_off_t)frame_clen, SEEK_CUR); /* skip past compressed data */
 
         vc_maxhandle = fstReaderVarint64(xc->f);
         vc_start = ftello(xc->f);       /* points to '!' character */
         packtype = fgetc(xc->f);
 
 #ifdef FST_DEBUG
-        fprintf(stderr, "\tframe_uclen: %d, frame_clen: %d, frame_maxhandle: %d\n",
+        fprintf(stderr, FST_APIMESS "frame_uclen: %d, frame_clen: %d, frame_maxhandle: %d\n",
                 (int)frame_uclen, (int)frame_clen, (int)frame_maxhandle);
-        fprintf(stderr, "\tvc_maxhandle: %d, packtype: %c\n", (int)vc_maxhandle, packtype);
+        fprintf(stderr, FST_APIMESS "vc_maxhandle: %d, packtype: %c\n", (int)vc_maxhandle, packtype);
 #endif
 
         indx_pntr = blkpos + seclen - 24 -tsec_clen -8;
@@ -5054,9 +5397,9 @@ for(;;)
         chain_clen = fstReaderUint64(xc->f);
         indx_pos = indx_pntr - chain_clen;
 #ifdef FST_DEBUG
-        fprintf(stderr, "\tindx_pos: %d (%d bytes)\n", (int)indx_pos, (int)chain_clen);
+        fprintf(stderr, FST_APIMESS "indx_pos: %d (%d bytes)\n", (int)indx_pos, (int)chain_clen);
 #endif
-        chain_cmem = malloc(chain_clen);
+        chain_cmem = (unsigned char *)malloc(chain_clen);
         if(!chain_cmem) goto block_err;
         fstReaderFseeko(xc, xc->f, indx_pos, SEEK_SET);
         fstFread(chain_cmem, chain_clen, 1, xc->f);
@@ -5067,8 +5410,8 @@ for(;;)
                 free(chain_table_lengths);
 
                 vc_maxhandle_largest = vc_maxhandle;
-                chain_table = calloc((vc_maxhandle+1), sizeof(off_t));
-                chain_table_lengths = calloc((vc_maxhandle+1), sizeof(uint32_t));
+                chain_table = (fst_off_t *)calloc((vc_maxhandle+1), sizeof(fst_off_t));
+                chain_table_lengths = (uint32_t *)calloc((vc_maxhandle+1), sizeof(uint32_t));
                 }
 
         if(!chain_table || !chain_table_lengths) goto block_err;
@@ -5173,11 +5516,11 @@ for(;;)
                 }
 
 #ifdef FST_DEBUG
-        fprintf(stderr, "\tdecompressed chain idx len: %"PRIu32"\n", idx);
+        fprintf(stderr, FST_APIMESS "decompressed chain idx len: %" PRIu32 "\n", idx);
 #endif
 
         mc_mem_len = 16384;
-        mc_mem = malloc(mc_mem_len); /* buffer for compressed reads */
+        mc_mem = (unsigned char *)malloc(mc_mem_len); /* buffer for compressed reads */
 
         /* check compressed VC data */
         if(idx > xc->maxhandle) idx = xc->maxhandle;
@@ -5207,7 +5550,7 @@ for(;;)
                                         if(mc_mem_len < chain_table_lengths[i])
                                                 {
                                                 free(mc_mem);
-                                                mc_mem = malloc(mc_mem_len = chain_table_lengths[i]);
+                                                mc_mem = (unsigned char *)malloc(mc_mem_len = chain_table_lengths[i]);
                                                 }
                                         mc = mc_mem;
 
@@ -5241,7 +5584,7 @@ for(;;)
 
                                 if(rc != Z_OK)
                                         {
-                                        printf("\tfac: %d clen: %d (rc=%d)\n", (int)i, (int)val, rc);
+                                        fprintf(stderr, FST_APIMESS "fstReaderIterBlocks2(), fac: %d clen: %d (rc=%d), exiting.\n", (int)i, (int)val, rc);
                                         exit(255);
                                         }
 
@@ -5286,14 +5629,16 @@ for(;;)
                                                 }
                                         }
 
-                                wx_len = sprintf(wx_buf, "#%"PRIu64"\n", time_table[i]);
+				if(dumpvars_state == 1) { wx_len = snprintf(wx_buf, 32, "$end\n"); fstWritex(xc, wx_buf, wx_len); dumpvars_state = 2; }
+                                wx_len = snprintf(wx_buf, 32, "#%" PRIu64 "\n", time_table[i]);
                                 fstWritex(xc, wx_buf, wx_len);
+				if(!dumpvars_state) { wx_len = snprintf(wx_buf, 32, "$dumpvars\n"); fstWritex(xc, wx_buf, wx_len); dumpvars_state = 1; }
 
                                 if((xc->num_blackouts)&&(cur_blackout != xc->num_blackouts))
                                         {
                                         if(time_table[i] == xc->blackout_times[cur_blackout])
                                                 {
-                                                wx_len = sprintf(wx_buf, "$dump%s $end\n", (xc->blackout_activity[cur_blackout++]) ? "on" : "off");
+                                                wx_len = snprintf(wx_buf, 32, "$dump%s $end\n", (xc->blackout_activity[cur_blackout++]) ? "on" : "off");
                                                 fstWritex(xc, wx_buf, wx_len);
                                                 }
                                         }
@@ -5386,7 +5731,7 @@ for(;;)
 
                                                                 vcdid_len = fstVcdIDForFwrite(vcd_id+1, idx+1);
                                                                 {
-                                                                unsigned char *vesc = malloc(len*4 + 1);
+                                                                unsigned char *vesc = (unsigned char *)malloc(len*4 + 1);
                                                                 int vlen = fstUtilityBinToEsc(vesc, vdata, len);
                                                                 fstWritex(xc, vesc, vlen);
                                                                 free(vesc);
@@ -5543,7 +5888,7 @@ for(;;)
                                                                         clone_d[j] = srcdata[7-j];
                                                                         }
                                                                 }
-                                                        sprintf((char *)xc->temp_signal_value_buf, "%.16g", d);
+                                                        snprintf((char *)xc->temp_signal_value_buf, xc->longest_signal_value_len + 1, "%.16g", d);
                                                         value_change_callback(user_callback_data_pointer, time_table[i], idx+1, xc->temp_signal_value_buf);
                                                         }
                                                 }
@@ -5569,7 +5914,7 @@ for(;;)
                                                                         }
                                                                 }
 
-                                                        wx_len = sprintf(wx_buf, "r%.16g", d);
+                                                        wx_len = snprintf(wx_buf, 32, "r%.16g", d);
                                                         fstWritex(xc, wx_buf, wx_len);
                                                         }
                                                 }
@@ -5675,7 +6020,7 @@ if(xc->signal_lens[facidx] == 1)
                                 }
                         }
 
-                sprintf((char *)buf, "%.16g", d);
+                snprintf((char *)buf, 32, "%.16g", d); /* this will write 18 bytes */
                 }
         }
 
@@ -5686,7 +6031,7 @@ return(buf);
 char *fstReaderGetValueFromHandleAtTime(void *ctx, uint64_t tim, fstHandle facidx, char *buf)
 {
 struct fstReaderContext *xc = (struct fstReaderContext *)ctx;
-off_t blkpos = 0, prev_blkpos;
+fst_off_t blkpos = 0, prev_blkpos;
 uint64_t beg_tim, end_tim, beg_tim2, end_tim2;
 int sectype;
 unsigned int secnum = 0;
@@ -5697,7 +6042,7 @@ uint64_t frame_uclen, frame_clen;
 #ifdef FST_DEBUG
 uint64_t mem_required_for_traversal;
 #endif
-off_t indx_pntr, indx_pos;
+fst_off_t indx_pntr, indx_pos;
 long chain_clen;
 unsigned char *chain_cmem;
 unsigned char *pnt;
@@ -5713,7 +6058,7 @@ if(!xc->rvat_sig_offs)
         {
         uint32_t cur_offs = 0;
 
-        xc->rvat_sig_offs = calloc(xc->maxhandle, sizeof(uint32_t));
+        xc->rvat_sig_offs = (uint32_t *)calloc(xc->maxhandle, sizeof(uint32_t));
         for(i=0;i<xc->maxhandle;i++)
                 {
                 xc->rvat_sig_offs[i] = cur_offs;
@@ -5759,7 +6104,7 @@ for(;;)
                 {
                 if((tim == end_tim) && (tim != xc->end_time))
                         {
-                        off_t cached_pos = ftello(xc->f);
+                        fst_off_t cached_pos = ftello(xc->f);
                         fstReaderFseeko(xc, xc->f, blkpos, SEEK_SET);
 
                         sectype = fgetc(xc->f);
@@ -5793,9 +6138,9 @@ mem_required_for_traversal =
         fstReaderUint64(xc->f);
 
 #ifdef FST_DEBUG
-fprintf(stderr, "rvat sec: %u seclen: %d begtim: %d endtim: %d\n",
+fprintf(stderr, FST_APIMESS "rvat sec: %u seclen: %d begtim: %d endtim: %d\n",
         secnum, (int)seclen, (int)beg_tim, (int)end_tim);
-fprintf(stderr, "\tmem_required_for_traversal: %d\n", (int)mem_required_for_traversal);
+fprintf(stderr, FST_APIMESS "mem_required_for_traversal: %d\n", (int)mem_required_for_traversal);
 #endif
 
 /* process time block */
@@ -5814,24 +6159,24 @@ tsec_uclen = fstReaderUint64(xc->f);
 tsec_clen = fstReaderUint64(xc->f);
 tsec_nitems = fstReaderUint64(xc->f);
 #ifdef FST_DEBUG
-fprintf(stderr, "\ttime section unc: %d, com: %d (%d items)\n",
+fprintf(stderr, FST_APIMESS "time section unc: %d, com: %d (%d items)\n",
         (int)tsec_uclen, (int)tsec_clen, (int)tsec_nitems);
 #endif
-ucdata = malloc(tsec_uclen);
+ucdata = (unsigned char *)malloc(tsec_uclen);
 destlen = tsec_uclen;
 sourcelen = tsec_clen;
 
-fstReaderFseeko(xc, xc->f, -24 - ((off_t)tsec_clen), SEEK_CUR);
+fstReaderFseeko(xc, xc->f, -24 - ((fst_off_t)tsec_clen), SEEK_CUR);
 if(tsec_uclen != tsec_clen)
         {
-        cdata = malloc(tsec_clen);
+        cdata = (unsigned char *)malloc(tsec_clen);
         fstFread(cdata, tsec_clen, 1, xc->f);
 
         rc = uncompress(ucdata, &destlen, cdata, sourcelen);
 
         if(rc != Z_OK)
                 {
-                printf("tsec uncompress rc = %d\n", rc);
+                fprintf(stderr, FST_APIMESS "fstReaderGetValueFromHandleAtTime(), tsec uncompress rc = %d, exiting.\n", rc);
                 exit(255);
                 }
 
@@ -5842,7 +6187,7 @@ if(tsec_uclen != tsec_clen)
         fstFread(ucdata, tsec_uclen, 1, xc->f);
         }
 
-xc->rvat_time_table = calloc(tsec_nitems, sizeof(uint64_t));
+xc->rvat_time_table = (uint64_t *)calloc(tsec_nitems, sizeof(uint64_t));
 tpnt = ucdata;
 tpval = 0;
 for(ti=0;ti<tsec_nitems;ti++)
@@ -5861,7 +6206,7 @@ fstReaderFseeko(xc, xc->f, blkpos+32, SEEK_SET);
 frame_uclen = fstReaderVarint64(xc->f);
 frame_clen = fstReaderVarint64(xc->f);
 xc->rvat_frame_maxhandle = fstReaderVarint64(xc->f);
-xc->rvat_frame_data = malloc(frame_uclen);
+xc->rvat_frame_data = (unsigned char *)malloc(frame_uclen);
 
 if(frame_uclen == frame_clen)
         {
@@ -5869,7 +6214,7 @@ if(frame_uclen == frame_clen)
         }
         else
         {
-        unsigned char *mc = malloc(frame_clen);
+        unsigned char *mc = (unsigned char *)malloc(frame_clen);
         int rc;
 
         unsigned long destlen = frame_uclen;
@@ -5879,7 +6224,7 @@ if(frame_uclen == frame_clen)
         rc = uncompress(xc->rvat_frame_data, &destlen, mc, sourcelen);
         if(rc != Z_OK)
                 {
-                printf("decompress rc: %d\n", rc);
+                fprintf(stderr, FST_APIMESS "fstReaderGetValueFromHandleAtTime(), frame decompress rc: %d, exiting.\n", rc);
                 exit(255);
                 }
         free(mc);
@@ -5890,9 +6235,9 @@ xc->rvat_vc_start = ftello(xc->f);      /* points to '!' character */
 xc->rvat_packtype = fgetc(xc->f);
 
 #ifdef FST_DEBUG
-fprintf(stderr, "\tframe_uclen: %d, frame_clen: %d, frame_maxhandle: %d\n",
+fprintf(stderr, FST_APIMESS "frame_uclen: %d, frame_clen: %d, frame_maxhandle: %d\n",
         (int)frame_uclen, (int)frame_clen, (int)xc->rvat_frame_maxhandle);
-fprintf(stderr, "\tvc_maxhandle: %d\n", (int)xc->rvat_vc_maxhandle);
+fprintf(stderr, FST_APIMESS "vc_maxhandle: %d\n", (int)xc->rvat_vc_maxhandle);
 #endif
 
 indx_pntr = blkpos + seclen - 24 -tsec_clen -8;
@@ -5900,14 +6245,14 @@ fstReaderFseeko(xc, xc->f, indx_pntr, SEEK_SET);
 chain_clen = fstReaderUint64(xc->f);
 indx_pos = indx_pntr - chain_clen;
 #ifdef FST_DEBUG
-fprintf(stderr, "\tindx_pos: %d (%d bytes)\n", (int)indx_pos, (int)chain_clen);
+fprintf(stderr, FST_APIMESS "indx_pos: %d (%d bytes)\n", (int)indx_pos, (int)chain_clen);
 #endif
-chain_cmem = malloc(chain_clen);
+chain_cmem = (unsigned char *)malloc(chain_clen);
 fstReaderFseeko(xc, xc->f, indx_pos, SEEK_SET);
 fstFread(chain_cmem, chain_clen, 1, xc->f);
 
-xc->rvat_chain_table = calloc((xc->rvat_vc_maxhandle+1), sizeof(off_t));
-xc->rvat_chain_table_lengths = calloc((xc->rvat_vc_maxhandle+1), sizeof(uint32_t));
+xc->rvat_chain_table = (fst_off_t *)calloc((xc->rvat_vc_maxhandle+1), sizeof(fst_off_t));
+xc->rvat_chain_table_lengths = (uint32_t *)calloc((xc->rvat_vc_maxhandle+1), sizeof(uint32_t));
 
 pnt = chain_cmem;
 idx = 0;
@@ -5916,10 +6261,10 @@ pval = 0;
 if(sectype == FST_BL_VCDATA_DYN_ALIAS2)
         {
         uint32_t prev_alias = 0;
-                                 
+
         do      {
                 int skiplen;
- 
+
                 if(*pnt & 0x01)
                         {
                         int64_t shval = fstGetSVarint64(pnt, &skiplen) >> 1;
@@ -5934,7 +6279,7 @@ if(sectype == FST_BL_VCDATA_DYN_ALIAS2)
                                 xc->rvat_chain_table[idx] = 0;                                   /* need to explicitly zero as calloc above might not run */
                                 xc->rvat_chain_table_lengths[idx] = prev_alias = shval;          /* because during this loop iter would give stale data! */
                                 idx++;
-                                } 
+                                }
                         else
                                 {
                                 xc->rvat_chain_table[idx] = 0;                                   /* need to explicitly zero as calloc above might not run */
@@ -5945,14 +6290,14 @@ if(sectype == FST_BL_VCDATA_DYN_ALIAS2)
                         else
                         {
                         uint64_t val = fstGetVarint32(pnt, &skiplen);
-        
+
                         fstHandle loopcnt = val >> 1;
                         for(i=0;i<loopcnt;i++)
                                 {
                                 xc->rvat_chain_table[idx++] = 0;
                                 }
                         }
-                        
+
                 pnt += skiplen;
                 } while (pnt != (chain_cmem + chain_clen));
         }
@@ -5962,7 +6307,7 @@ if(sectype == FST_BL_VCDATA_DYN_ALIAS2)
 	        {
 	        int skiplen;
 	        uint64_t val = fstGetVarint32(pnt, &skiplen);
-	
+
 	        if(!val)
 	                {
 	                pnt += skiplen;
@@ -5986,7 +6331,7 @@ if(sectype == FST_BL_VCDATA_DYN_ALIAS2)
 	                        xc->rvat_chain_table[idx++] = 0;
 	                        }
 	                }
-	
+
 	        pnt += skiplen;
 	        } while (pnt != (chain_cmem + chain_clen));
 	}
@@ -6011,7 +6356,7 @@ for(i=0;i<idx;i++)
         }
 
 #ifdef FST_DEBUG
-fprintf(stderr, "\tdecompressed chain idx len: %"PRIu32"\n", idx);
+fprintf(stderr, FST_APIMESS "decompressed chain idx len: %" PRIu32 "\n", idx);
 #endif
 
 xc->rvat_data_valid = 1;
@@ -6049,8 +6394,8 @@ if(!xc->rvat_chain_mem)
         xc->rvat_chain_len = fstReaderVarint32WithSkip(xc->f, &skiplen);
         if(xc->rvat_chain_len)
                 {
-                unsigned char *mu = malloc(xc->rvat_chain_len);
-                unsigned char *mc = malloc(xc->rvat_chain_table_lengths[facidx]);
+                unsigned char *mu = (unsigned char *)malloc(xc->rvat_chain_len);
+                unsigned char *mc = (unsigned char *)malloc(xc->rvat_chain_table_lengths[facidx]);
                 unsigned long destlen = xc->rvat_chain_len;
                 unsigned long sourcelen = xc->rvat_chain_table_lengths[facidx];
                 int rc = Z_OK;
@@ -6071,7 +6416,7 @@ if(!xc->rvat_chain_mem)
 
                 if(rc != Z_OK)
                         {
-                        printf("\tclen: %d (rc=%d)\n", (int)xc->rvat_chain_len, rc);
+                        fprintf(stderr, FST_APIMESS "fstReaderGetValueFromHandleAtTime(), rvat decompress clen: %d (rc=%d), exiting.\n", (int)xc->rvat_chain_len, rc);
                         exit(255);
                         }
 
@@ -6081,7 +6426,7 @@ if(!xc->rvat_chain_mem)
                 else
                 {
                 int destlen = xc->rvat_chain_table_lengths[facidx] - skiplen;
-                unsigned char *mu = malloc(xc->rvat_chain_len = destlen);
+                unsigned char *mu = (unsigned char *)malloc(xc->rvat_chain_len = destlen);
                 fstFread(mu, destlen, 1, xc->f);
                 /* data to process is for(j=0;j<destlen;j++) in mu[j] */
                 xc->rvat_chain_mem = mu;
@@ -6267,7 +6612,7 @@ if(xc->signal_lens[facidx] == 1)
                                         }
                                 }
 
-                        sprintf(buf, "r%.16g", d);
+                        snprintf(buf, 32, "r%.16g", d); /* this will write 19 bytes */
                         return(buf);
                         }
                 }
@@ -6382,17 +6727,17 @@ static uint32_t j_hash(const uint8_t *k, uint32_t length, uint32_t initval)
    c += length;
    switch(len)              /* all the case statements fall through */
    {
-   case 11: c+=((uint32_t)k[10]<<24);
-   case 10: c+=((uint32_t)k[9]<<16);
-   case 9 : c+=((uint32_t)k[8]<<8);
+   case 11: c+=((uint32_t)k[10]<<24); /* fallthrough */
+   case 10: c+=((uint32_t)k[9]<<16); /* fallthrough */
+   case 9 : c+=((uint32_t)k[8]<<8); /* fallthrough */
       /* the first byte of c is reserved for the length */
-   case 8 : b+=((uint32_t)k[7]<<24);
-   case 7 : b+=((uint32_t)k[6]<<16);
-   case 6 : b+=((uint32_t)k[5]<<8);
-   case 5 : b+=k[4];
-   case 4 : a+=((uint32_t)k[3]<<24);
-   case 3 : a+=((uint32_t)k[2]<<16);
-   case 2 : a+=((uint32_t)k[1]<<8);
+   case 8 : b+=((uint32_t)k[7]<<24); /* fallthrough */
+   case 7 : b+=((uint32_t)k[6]<<16); /* fallthrough */
+   case 6 : b+=((uint32_t)k[5]<<8); /* fallthrough */
+   case 5 : b+=k[4]; /* fallthrough */
+   case 4 : a+=((uint32_t)k[3]<<24); /* fallthrough */
+   case 3 : a+=((uint32_t)k[2]<<16); /* fallthrough */
+   case 2 : a+=((uint32_t)k[1]<<8); /* fallthrough */
    case 1 : a+=k[0];
      /* case 0: nothing left to add */
    }
@@ -6427,7 +6772,7 @@ struct collchain_t *chain, *pchain;
 
 if(!*base)
         {
-        *base = calloc(1, (hashmask + 1) * sizeof(void *));
+        *base = (struct collchain_t **)calloc(1, (hashmask + 1) * sizeof(void *));
         }
 ar = *base;
 
@@ -6450,7 +6795,7 @@ while(chain)
         chain = chain->next;
         }
 
-chain = calloc(1, sizeof(struct collchain_t) + length - 1);
+chain = (struct collchain_t *)calloc(1, sizeof(struct collchain_t) + length - 1);
 memcpy(chain->mem, mem, length);
 chain->fullhash = hf;
 chain->length = length;
@@ -6496,9 +6841,46 @@ if(base && *base)
 /***                  ***/
 /************************/
 
-int fstUtilityBinToEsc(unsigned char *d, unsigned char *s, int len)
+int fstUtilityBinToEscConvertedLen(const unsigned char *s, int len)
 {
-unsigned char *src = s;
+const unsigned char *src = s;
+int dlen = 0;
+int i;
+
+for(i=0;i<len;i++)
+        {
+        switch(src[i])
+                {
+                case '\a':      /* fallthrough */
+                case '\b':	/* fallthrough */
+                case '\f':	/* fallthrough */
+                case '\n':	/* fallthrough */
+                case '\r':	/* fallthrough */
+                case '\t':	/* fallthrough */
+                case '\v':	/* fallthrough */
+                case '\'':	/* fallthrough */
+                case '\"':	/* fallthrough */
+                case '\\':	/* fallthrough */
+                case '\?':      dlen += 2; break;
+                default:        if((src[i] > ' ') && (src[i] <= '~')) /* no white spaces in output */
+                                        {
+					dlen++;
+                                        }
+                                        else
+                                        {
+					dlen += 4;
+                                        }
+                                break;
+                }
+        }
+
+return(dlen);
+}
+
+
+int fstUtilityBinToEsc(unsigned char *d, const unsigned char *s, int len)
+{
+const unsigned char *src = s;
 unsigned char *dst = d;
 unsigned char val;
 int i;
@@ -6596,4 +6978,77 @@ for(i=0;i<len;i++)
         }
 
 return(dst - s);
+}
+
+
+struct fstETab *fstUtilityExtractEnumTableFromString(const char *s)
+{
+struct fstETab *et = NULL;
+int num_spaces = 0;
+int i;
+int newlen;
+
+if(s)
+	{
+	const char *csp = strchr(s, ' ');
+	int cnt = atoi(csp+1);
+
+	for(;;)
+		{
+		csp = strchr(csp+1, ' ');
+		if(csp) { num_spaces++; } else { break; }
+		}
+
+	if(num_spaces == (2*cnt))
+		{
+		char *sp, *sp2;
+
+		et = (struct fstETab*)calloc(1, sizeof(struct fstETab));
+		et->elem_count = cnt;
+		et->name = strdup(s);
+		et->literal_arr = (char**)calloc(cnt, sizeof(char *));
+		et->val_arr = (char**)calloc(cnt, sizeof(char *));
+
+		sp = strchr(et->name, ' ');
+		*sp = 0;
+
+		sp = strchr(sp+1, ' ');
+
+		for(i=0;i<cnt;i++)
+			{
+			sp2 = strchr(sp+1, ' ');
+			*(char*)sp2 = 0;
+			et->literal_arr[i] = sp+1;
+			sp = sp2;
+
+			newlen = fstUtilityEscToBin(NULL, (unsigned char*)et->literal_arr[i], strlen(et->literal_arr[i]));
+			et->literal_arr[i][newlen] = 0;
+			}
+
+		for(i=0;i<cnt;i++)
+			{
+			sp2 = strchr(sp+1, ' ');
+			if(sp2) { *sp2 = 0; }
+			et->val_arr[i] = sp+1;
+			sp = sp2;
+
+			newlen = fstUtilityEscToBin(NULL, (unsigned char*)et->val_arr[i], strlen(et->val_arr[i]));
+			et->val_arr[i][newlen] = 0;
+			}
+		}
+	}
+
+return(et);
+}
+
+
+void fstUtilityFreeEnumTable(struct fstETab *etab)
+{
+if(etab)
+	{
+	free(etab->literal_arr);
+	free(etab->val_arr);
+	free(etab->name);
+	free(etab);
+	}
 }

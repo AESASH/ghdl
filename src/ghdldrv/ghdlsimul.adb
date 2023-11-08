@@ -37,11 +37,14 @@ with Vhdl.Configuration;
 with Vhdl.Utils;
 with Vhdl.Back_End;
 
+with Ortho_Jit;
+
 with Grt.Options;
 with Grt.Types;
 with Grt.Errors;
 
 with Ghdlcomp; use Ghdlcomp;
+with Ghdlvpi;
 with Grtlink;
 
 --  For Elaborate.
@@ -50,32 +53,49 @@ with Elab.Vhdl_Debug;
 with Elab.Vhdl_Insts;
 with Elab.Debugger;
 
+with Translation;
+
 with Synth.Flags;
 with Synth.Errors;
 with Synth.Vhdl_Foreign;
 
 with Simul.Vhdl_Elab;
+with Simul.Vhdl_Compile;
 with Simul.Vhdl_Simul;
 with Simul.Main;
 
 package body Ghdlsimul is
+   Flag_Compile : Boolean := True;
+
+   procedure Ghdl_Elaborate;
+   pragma Export (C, Ghdl_Elaborate, "__ghdl_ELABORATE");
+
+   type Elaborate_Acc is access procedure;
+   Elaborate_Proc : Elaborate_Acc := null;
+
+   procedure Ghdl_Elaborate is
+   begin
+      Elaborate_Proc.all;
+   end Ghdl_Elaborate;
+
    procedure Compile_Init (Analyze_Only : Boolean) is
    begin
       Common_Compile_Init (Analyze_Only);
-
-      Vhdl.Back_End.Sem_Foreign := Vhdl.Back_End.Sem_Foreign_Wrapper'Access;
-
       if Analyze_Only then
          return;
       end if;
+
+      Vhdl.Back_End.Sem_Foreign := Vhdl.Back_End.Sem_Foreign_Wrapper'Access;
 
       --  The design is always analyzed in whole.
       Flags.Flag_Whole_Analyze := True;
       Vhdl.Canon.Canon_Flag_Add_Labels := True;
       Vhdl.Canon.Canon_Flag_Add_Suspend_State := True;
 
-      --  Do not canon concurrent statements.
-      Vhdl.Canon.Canon_Flag_Concurrent_Stmts := False;
+      if not Flag_Compile then
+         --  Do not canon concurrent statements.
+         Vhdl.Canon.Canon_Flag_Concurrent_Stmts := False;
+      end if;
    end Compile_Init;
 
    procedure Compile_Elab
@@ -194,15 +214,30 @@ package body Ghdlsimul is
 --           T := new String'(Str & Ghdllocal.Nul);
 --           return To_Ghdl_C_String (T.all'Address);
 --        end Strdup;
+
+      Ni : Positive;
    begin
       Argc := 1 + Args'Length;
       Argv := Malloc
         (size_t (Argc * (Ghdl_C_String'Size / System.Storage_Unit)));
       Argv (0) := Strdup (Ada.Command_Line.Command_Name & Ghdllocal.Nul);
       Progname := Argv (0);
+
+      Ni := 1;
       for I in Args'Range loop
-         Argv (1 + I - Args'First) := Strdup (Args (I).all & Ghdllocal.Nul);
+         declare
+            Arg : String renames Args (I).all;
+         begin
+            if Arg'Last > 11 and then Arg (1 .. 11) = "--wave-csv=" then
+               Simul.Main.Csv_Filename := new String'(Arg (12 .. Arg'Last));
+            else
+               Argv (Ni) := Strdup (Args (I).all & Ghdllocal.Nul);
+               Ni := Ni + 1;
+            end if;
+         end;
       end loop;
+
+      Argc := Ni;
    end Set_Run_Options;
 
    procedure Run
@@ -221,13 +256,20 @@ package body Ghdlsimul is
 
       Synth.Flags.Severity_Level := Grt.Options.Severity_Level;
 
-      Simul.Vhdl_Simul.Simulation;
+      if Flag_Compile then
+         Elaborate_Proc := Simul.Vhdl_Compile.Elaborate'Access;
+         Simul.Vhdl_Compile.Simulation;
+      else
+         Elaborate_Proc := Simul.Vhdl_Simul.Runtime_Elaborate'Access;
+         Simul.Vhdl_Simul.Simulation;
+      end if;
 
       Set_Exit_Status (Exit_Status (Grt.Errors.Exit_Status));
    end Run;
 
    function Decode_Option (Option : String) return Boolean
    is
+      pragma Assert (Option'First = 1);
       Res : Options.Option_State;
       pragma Unreferenced (Res);
    begin
@@ -235,15 +277,27 @@ package body Ghdlsimul is
          Elab.Debugger.Flag_Debug_Enable := True;
       elsif Option = "-t" then
          Synth.Flags.Flag_Trace_Statements := True;
+      elsif Option = "-ta" then
+         Simul.Vhdl_Simul.Trace_Solver := True;
+      elsif Option = "-tr" then
+         Simul.Vhdl_Simul.Trace_Residues := True;
       elsif Option = "-i" then
          Simul.Main.Flag_Interractive := True;
       elsif Option = "-ge" then
          Simul.Main.Flag_Debug_Elab := True;
+      elsif Option = "--jit" then
+         Flag_Compile := True;
+      elsif Option = "--interp" then
+         Flag_Compile := False;
       elsif Option'Last > 3
         and then Option (Option'First + 1) = 'g'
         and then Is_Generic_Override_Option (Option)
       then
          Res := Decode_Generic_Override_Option (Option);
+      elsif Flag_Compile
+        and then Ortho_Jit.Decode_Option (Option)
+      then
+         null;
       else
          return False;
       end if;
@@ -265,5 +319,7 @@ package body Ghdlsimul is
                          Decode_Option'Access,
                          Disp_Help'Access);
       Ghdlcomp.Register_Commands;
+      Translation.Register_Translation_Back_End;
+      Ghdlvpi.Register_Commands;
    end Register_Commands;
 end Ghdlsimul;

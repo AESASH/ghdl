@@ -17,6 +17,7 @@ CC=@CC@
 CFLAGS=@CFLAGS@
 CXX=@CXX@
 CXXFLAGS=@CXXFLAGS@
+AR=@AR@
 build=@build@
 srcdir=@srcdir@
 abs_srcdir=@abs_srcdir@
@@ -108,7 +109,7 @@ WARN_CFLAGS=-Wall
 CFLAGS:=$(OPT_FLAGS) $(WARN_CFLAGS) $(CFLAGS)
 CXXFLAGS:=$(OPT_FLAGS) $(WARN_CFLAGS) $(CXXFLAGS)
 
-GNAT_BARGS=-bargs -E
+GNAT_BARGS=-bargs -static
 
 target=$(build)
 #target=i686-pc-linux-gnu
@@ -176,7 +177,7 @@ default_paths.ads: $(srcdir)/default_paths.ads.in ./config.status
 scripts/gcc/Make-lang.in: $(srcdir)/scripts/gcc/Make-lang.in.in ./config.status
 	./config.status
 
-GHDL_COMMON_INCFLAGS=-aI$(srcdir)/src -aI$(srcdir)/src/vhdl -aI$(srcdir)/src/synth -aI$(srcdir)/src/grt -aI$(srcdir)/src/psl -aI$(srcdir)/src/vhdl/translate
+GHDL_COMMON_INCFLAGS=-aI$(srcdir)/src -aI$(srcdir)/src/vhdl -aI$(srcdir)/src/verilog -aI$(srcdir)/src/synth -aI$(srcdir)/src/grt -aI$(srcdir)/src/psl -aI$(srcdir)/src/vhdl/translate
 
 GRTSRCDIR=$(abs_srcdir)/src/grt
 include $(srcdir)/src/grt/Makefile.inc
@@ -208,12 +209,12 @@ version.ads: version.tmp
 
 all.mcode: ghdl_mcode$(EXEEXT) libs.vhdl.mcode all.vpi
 
-GHDL_MCODE_INCFLAGS=$(GHDL_COMMON_INCFLAGS) -aI$(srcdir)/src/ghdldrv -aI$(srcdir)/src/ortho -aI$(srcdir)/src/ortho/mcode -aI$(srcdir)/src/synth
+GHDL_MCODE_INCFLAGS=$(GHDL_COMMON_INCFLAGS) -aI$(srcdir)/src/ghdldrv -aI$(srcdir)/src/ortho -aI$(srcdir)/src/ortho/mcode -aI$(srcdir)/src/synth -aI$(srcdir)/src/simul
 
 ghdl_mcode$(EXEEXT): GRT_FLAGS+=-DWITH_GNAT_RUN_TIME
 ghdl_mcode$(EXEEXT): $(GRT_ADD_OBJS) $(GRT_SRC_DEPS) $(ORTHO_DEPS) \
             memsegs_c.o version.ads force
-	$(GNATMAKE) -o $@ -gnat12 $(GHDL_MCODE_INCFLAGS) $(GNATFLAGS) -gnatw.A ghdl_jit.adb $(GNAT_BARGS) -largs memsegs_c.o $(GRT_ADD_OBJS) $(LDFLAGS) $(subst @,$(GRTSRCDIR),$(GRT_EXTRA_LIB) $(GRT_EXEC_OPTS))  $(sundials_ldflags) -shared-libgcc
+	$(GNATMAKE) -o $@ -gnat12 $(GHDL_MCODE_INCFLAGS) $(GNATFLAGS) -gnatw.A ghdl_jit.adb $(GNAT_BARGS) -largs memsegs_c.o $(GRT_ADD_OBJS) $(LDFLAGS) $(subst @,$(GRTSRCDIR),$(GRT_EXTRA_LIB) $(GRT_EXEC_OPTS)) $(sundials_ldflags) -shared-libgcc
 
 memsegs_c.o: $(srcdir)/src/ortho/mcode/memsegs_c.c
 	$(CC) -c $(COVERAGE_FLAGS) $(CFLAGS) -o $@ $<
@@ -265,6 +266,7 @@ copy-sources.gcc: version.ads scripts/gcc/Make-lang.in
 	$(CP) -p $(srcdir)/src/vhdl/translate/*.ad? $(gcc_vhdl_dir)
 	$(CP) -p $(srcdir)/src/synth/*.ad? $(gcc_vhdl_dir)
 	$(CP) -p $(srcdir)/src/psl/*.ad? $(gcc_vhdl_dir)
+	$(CP) -p $(srcdir)/src/verilog/*.ad? $(gcc_vhdl_dir)
 	$(CP) -p $(srcdir)/src/grt/grt.ad? $(gcc_vhdl_dir)
 	$(CP) -p $(srcdir)/src/grt/grt-types.ads $(gcc_vhdl_dir)
 	$(CP) -p $(srcdir)/src/grt/grt-vhdl_types.ads $(gcc_vhdl_dir)
@@ -273,7 +275,9 @@ copy-sources.gcc: version.ads scripts/gcc/Make-lang.in
 	$(CP) -p $(srcdir)/src/grt/grt-algos.ad? $(gcc_vhdl_dir)
 	$(CP) -p $(srcdir)/src/grt/grt-arith.ad? $(gcc_vhdl_dir)
 	$(CP) -p $(srcdir)/src/grt/grt-vstrings.ad? $(gcc_vhdl_dir)
+	$(CP) -p $(srcdir)/src/grt/grt-rstrings.ad? $(gcc_vhdl_dir)
 	$(CP) -p $(srcdir)/src/grt/grt-cstdio.c $(gcc_vhdl_dir)
+	$(CP) -p $(srcdir)/src/grt/grt-astdio.ad? $(gcc_vhdl_dir)
 	$(CP) -p $(srcdir)/src/grt/grt-stdio.ad? $(gcc_vhdl_dir)
 	$(CP) -p $(srcdir)/src/grt/grt-table.ad? $(gcc_vhdl_dir)
 	$(CP) -p $(srcdir)/src/grt/grt-files_operations.ad? $(gcc_vhdl_dir)
@@ -356,6 +360,7 @@ libs.vhdl.local_gcc: ghdl_gcc$(EXEEXT) ghdl1-gcc$(EXEEXT)
 ghdl1-debug$(EXEEXT): version.ads $(GRT_SYNTH_OBJS) force
 	$(MAKE) -f $(srcdir)/src/ortho/debug/Makefile \
 	 ortho_srcdir=$(srcdir)/src/ortho ortho_exec=$@ \
+	 GNAT_BARGS="$(GNAT_BARGS)" \
 	 GNATFLAGS="$(GHDL_GCC_INCFLAGS) $(GNATFLAGS)" \
 	 GNATLFLAGS="$(GRT_SYNTH_OBJS)" \
 	 GNATMAKE="$(GNATMAKE)" all
@@ -434,13 +439,13 @@ uninstall.llvm: uninstall.llvm.program uninstall.grt
 
 ################ For simul (no code generation, interpretation) ##########
 
-GHDL_SIMUL_INCFLAGS=$(GHDL_COMMON_INCFLAGS) -aI$(srcdir)/src/ghdldrv -aI$(srcdir)/src/simul -aI$(srcdir)/src/synth
+GHDL_SIMUL_INCFLAGS=$(GHDL_COMMON_INCFLAGS) -aI$(srcdir)/src/ghdldrv -aI$(srcdir)/src/simul -aI$(srcdir)/src/synth -aI$(srcdir)/src/ortho -aI$(srcdir)/src/ortho/mcode
 
-GRT_SIMUL_OBJS=$(GRT_C_OBJS) grt-cdynload.o
+GRT_SIMUL_OBJS=$(GRT_C_OBJS) grt-cdynload.o memsegs_c.o
 
 ghdl_simul$(EXEEXT): GRT_FLAGS+=-DWITH_GNAT_RUN_TIME
-ghdl_simul$(EXEEXT): $(GRT_SIMUL_OBJS) $(GRT_SRC_DEPS) version.ads force
-	$(GNATMAKE) $(GHDL_SIMUL_INCFLAGS) $(GNATFLAGS) -gnat12 ghdl_simul $(GNAT_BARGS) -largs $(LDFLAGS) $(GRT_SIMUL_OBJS) $(subst @,$(GRTSRCDIR),$(GRT_EXTRA_LIB)) $(sundials_ldflags)
+ghdl_simul$(EXEEXT): $(GRT_ADD_OBJS) $(GRT_SRC_DEPS) version.ads force
+	$(GNATMAKE) $(GHDL_SIMUL_INCFLAGS) $(GNATFLAGS) -gnat12 ghdl_simul $(GNAT_BARGS) -largs memsegs_c.o $(GRT_ADD_OBJS) $(LDFLAGS) $(subst @,$(GRTSRCDIR),$(GRT_EXTRA_LIB) $(GRT_EXEC_OPTS)) $(sundials_ldflags) -shared-libgcc
 
 libs.vhdl.simul: ghdl_simul$(EXEEXT)
 	$(MAKE) -f $(srcdir)/libraries/Makefile.inc $(LIBVHDL_FLAGS_TO_PASS) GHDL=$(PWD)/ghdl_simul$(EXEEXT) GHDL_FLAGS="" VHDLLIBS_COPY_OBJS=no vhdl.libs.all
@@ -479,7 +484,7 @@ libghdl.a: lib/$(libghdl_name)
 #	Also create a static library
 	sed -e '1,/--  BEGIN/d' -e '/--  END/,$$d' -e 's/^   --   //' < b~libghdl.adb > libghdl.bind
 	$(RM) -f $@
-	ar rc $@ b~libghdl.o $(LIBGHDL_GRT_OBJS) `sed -e /^-/d < libghdl.bind`
+	$(AR) rc $@ b~libghdl.o $(LIBGHDL_GRT_OBJS) `sed -e /^-/d < libghdl.bind`
 	grep adalib libghdl.bind | sed -e 's/^-L//' -e 's@adalib/@adalib/libgnat.a@' > libghdl.link
 
 $(srcdir)/src/synth/include/synth_gates.h: $(srcdir)/src/synth/netlists.ads $(srcdir)/src/synth/netlists-gates.ads
@@ -719,10 +724,12 @@ distclean: clean
 
 clean-c: force
 	$(RM) -f memsegs_c.o chkstk.o chkstk-x64.o jumps.o times.o
+	$(RM) -f win32.o clock.o
 	$(RM) -f grt-cstdio.o grt-cgnatrts.o grt-modules.o
 	$(RM) -f grt-cvpi.o grt-cvhpi.o grt-cdynload.o
 	$(RM) -f fstapi.o fastlz.o lz4.o
 	$(RM) -f pic/times.o pic/grt-cvpi.o pic/grt-cvhpi.o pic/jumps.o
+	$(RM) -f pic/win32.o pic/clock.o
 	$(RM) -f pic/grt-cstdio.o pic/grt-cgnatrts.o pic/grt-modules.o
 	$(RM) -f pic/grt-cdynload.o
 

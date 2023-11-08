@@ -25,8 +25,8 @@ with Types; use Types;
 with Name_Table; use Name_Table;
 with Simple_IO; use Simple_IO;
 with Utils_IO; use Utils_IO;
+with Debuggers; use Debuggers;
 
-with Vhdl.Nodes; use Vhdl.Nodes;
 with Vhdl.Utils; use Vhdl.Utils;
 with Vhdl.Errors;
 
@@ -127,15 +127,9 @@ package body Simul.Vhdl_Debug is
       New_Line;
       Put ("     formal: ");
       Disp_Conn_Endpoint (C.Formal);
-      if C.Drive_Formal then
-         Put (" [drive]");
-      end if;
       New_Line;
       Put ("     actual: ");
       Disp_Conn_Endpoint (C.Actual);
-      if C.Drive_Actual then
-         Put (" [drive]");
-      end if;
       New_Line;
    end Disp_Conn_Entry;
 
@@ -361,6 +355,7 @@ package body Simul.Vhdl_Debug is
      (Info_Scalar_Signal_Action);
 
    type Info_Signal_Options is record
+      Max_Sz : Size_Type;
       Value : Boolean;
       Conn : Boolean;
       Types : Boolean;
@@ -369,34 +364,18 @@ package body Simul.Vhdl_Debug is
       Actions : Boolean;
    end record;
 
-   procedure Info_Signal_Opts (Idx : Signal_Index_Type;
-                               Opts : Info_Signal_Options)
-   is
-      use Elab.Memtype;
-      S : Signal_Entry renames Signals_Table.Table (Idx);
-      Nbr_Drv : Int32;
-      Nbr_Conn_Drv : Int32;
-      Nbr_Sens : Int32;
-      Sens : Sensitivity_Index_Type;
-      Driver : Driver_Index_Type;
-      Conn : Connect_Index_Type;
+   procedure Put_Signal_Name (Inst : Synth_Instance_Acc; Decl : Node) is
    begin
-      Put_Int32 (Int32 (Idx));
-      Put (": ");
-      if S.Decl = Null_Iir then
-         Put_Line ("??");
-         return;
-      end if;
-
-      Disp_Instance_Path (S.Inst, True);
+      Disp_Instance_Path (Inst, True);
       Put ('/');
-      Put (Image (Get_Identifier (S.Decl)));
 
-      case Get_Kind (S.Decl) is
+      case Get_Kind (Decl) is
          when Iir_Kind_Signal_Declaration =>
+            Put (Image (Get_Identifier (Decl)));
             Put (" [sig]");
          when Iir_Kind_Interface_Signal_Declaration =>
-            case Get_Mode (S.Decl) is
+            Put (Image (Get_Identifier (Decl)));
+            case Get_Mode (Decl) is
                when Iir_In_Mode =>
                   Put (" [in]");
                when Iir_Out_Mode =>
@@ -411,48 +390,54 @@ package body Simul.Vhdl_Debug is
                   Put (" [??]");
             end case;
          when Iir_Kind_Guard_Signal_Declaration =>
+            Put (Image (Get_Identifier (Decl)));
             Put (" [guard]");
+         when Iir_Kind_Above_Attribute =>
+            Put (" [above]");
+         when Iir_Kind_Delayed_Attribute =>
+            Put (" [delayed]");
          when others =>
             raise Internal_Error;
       end case;
+   end Put_Signal_Name;
+
+   procedure Info_Signal_Opts (Idx : Signal_Index_Type;
+                               Opts : Info_Signal_Options)
+   is
+      use Elab.Memtype;
+      S : Signal_Entry renames Signals_Table.Table (Idx);
+      Nbr_Drv : Int32;
+      Nbr_Sens : Int32;
+      Sens : Sensitivity_Index_Type;
+      Driver : Driver_Index_Type;
+      Conn : Connect_Index_Type;
+   begin
+      Put_Int32 (Int32 (Idx));
+      Put (": ");
+      if S.Decl = Null_Iir then
+         Put_Line ("??");
+         return;
+      end if;
+
+      Put_Signal_Name (S.Inst, S.Decl);
 
       if Opts.Value = False then
          Put (" = ");
-         Disp_Memtyp ((S.Typ, S.Val), Get_Type (S.Decl));
+         if S.Typ.Sz > Opts.Max_Sz then
+            Put ("[too large]");
+         else
+            Disp_Memtyp ((S.Typ, S.Val), Get_Type (S.Decl));
+         end if;
       end if;
       New_Line;
 
       if Opts.Types then
          Put ("  type: ");
-         Debug_Type_Short (S.Typ);
-         Put (", len: ");
-         Put_Uns32 (S.Typ.W);
-         New_Line;
+         Debug_Typ (S.Typ);
       end if;
 
       if Opts.Conn then
-         if S.Kind in Mode_Signal_User then
-            Nbr_Conn_Drv := 0;
-            Conn := S.Connect;
-            while Conn /= No_Connect_Index loop
-               declare
-                  C : Connect_Entry renames Connect_Table.Table (Conn);
-               begin
-                  if C.Formal.Base = Idx then
-                     if C.Drive_Formal then
-                        Nbr_Conn_Drv := Nbr_Conn_Drv + 1;
-                     end if;
-                     Conn := C.Formal_Link;
-                  else
-                     pragma Assert (C.Actual.Base = Idx);
-                     if C.Drive_Actual then
-                        Nbr_Conn_Drv := Nbr_Conn_Drv + 1;
-                     end if;
-                     Conn := C.Actual_Link;
-                  end if;
-               end;
-            end loop;
-
+         if S.Kind = Signal_User then
             Nbr_Drv := 0;
             Driver := S.Drivers;
             while Driver /= No_Driver_Index loop
@@ -461,8 +446,6 @@ package body Simul.Vhdl_Debug is
             end loop;
             Put ("  nbr drivers: ");
             Put_Int32 (Nbr_Drv);
-            Put (", nbr conn srcs: ");
-            Put_Int32 (Nbr_Conn_Drv);
             Put (", ");
          else
             Put ("  ");
@@ -483,7 +466,7 @@ package body Simul.Vhdl_Debug is
          New_Line;
       end if;
 
-      if Opts.Sources and then S.Kind in Mode_Signal_User then
+      if Opts.Sources and then S.Kind = Signal_User then
          Put ("  nbr sources (drv + conn : total):");
          New_Line;
          for I in 0 .. S.Typ.W - 1 loop
@@ -500,7 +483,7 @@ package body Simul.Vhdl_Debug is
       end if;
 
       if Opts.Conn then
-         if S.Kind in Mode_Signal_User then
+         if S.Kind = Signal_User then
             Driver := S.Drivers;
             while Driver /= No_Driver_Index loop
                declare
@@ -570,11 +553,78 @@ package body Simul.Vhdl_Debug is
 
    procedure Info_Signal (Idx : Signal_Index_Type) is
    begin
-      Info_Signal_Opts (Idx, (others => True));
+      Info_Signal_Opts (Idx, (Max_Sz => 256, others => True));
    end Info_Signal;
 
    --  For gdb.
    pragma Unreferenced (Info_Signal);
+
+   function Find_Signal_By_Addr (Sig : Ghdl_Signal_Ptr)
+                                return Signal_Index_Type
+   is
+      function Is_Signal_Inside (Addr : Ghdl_Signal_Ptr;
+                                 S : Memtyp) return Boolean
+      is
+         use Simul.Vhdl_Simul;
+      begin
+         case S.Typ.Kind is
+            when Type_Scalars =>
+               return Read_Sig (S.Mem) = Addr;
+            when Type_Vector
+              | Type_Array =>
+               declare
+                  Len : constant Uns32 := S.Typ.Abound.Len;
+                  Stride : constant Uns32 := S.Typ.Arr_El.W;
+                  Sub : Memtyp;
+               begin
+                  Sub.Typ := S.Typ.Arr_El;
+                  for I in 1 .. Len loop
+                     Sub.Mem := Sig_Index (S.Mem, (Len - I) * Stride);
+                     if Is_Signal_Inside (Addr, Sub) then
+                        return True;
+                     end if;
+                  end loop;
+               end;
+            when Type_Record =>
+               declare
+                  Sub : Memtyp;
+               begin
+                  for I in S.Typ.Rec.E'Range loop
+                     Sub.Mem := Sig_Index (S.Mem,
+                                           S.Typ.Rec.E (I).Offs.Net_Off);
+                     Sub.Typ := S.Typ.Rec.E (I).Typ;
+                     if Is_Signal_Inside (Addr, Sub) then
+                        return True;
+                     end if;
+                  end loop;
+               end;
+            when Type_Unbounded_Vector
+              | Type_Unbounded_Record
+              | Type_Array_Unbounded
+              | Type_Unbounded_Array
+              | Type_Slice
+              | Type_Protected
+              | Type_File
+              | Type_Access =>
+               raise Internal_Error;
+         end case;
+         return False;
+      end Is_Signal_Inside;
+   begin
+      for I in Signals_Table.First .. Signals_Table.Last loop
+         declare
+            S : Signal_Entry renames Signals_Table.Table (I);
+         begin
+            if Is_Signal_Inside (Sig, (S.Typ, S.Sig)) then
+               return I;
+            end if;
+         end;
+      end loop;
+      return No_Signal_Index;
+   end Find_Signal_By_Addr;
+
+   --  For gdb.
+   pragma Unreferenced (Find_Signal_By_Addr);
 
    procedure Info_Signal_Proc (Line : String)
    is
@@ -583,7 +633,8 @@ package body Simul.Vhdl_Debug is
       Idx : Uns32;
       Valid : Boolean;
    begin
-      Opts := (others => False);
+      Opts := (Max_Sz => 80,
+               others => False);
       Idx := 0;
 
       F := Line'First;
@@ -675,8 +726,8 @@ package body Simul.Vhdl_Debug is
          begin
             Put ("  scal #");
             Put_Uns32 (Uns32 (Idx));
-            Put ("  idx: ");
-            Put_Int32 (Int32 (Sq.Idx));
+            Put ("  y_idx: ");
+            Put_Int32 (Int32 (Sq.Y_Idx));
             Put (", deriv: ");
             Put_Uns32 (Uns32 (Sq.Deriv));
             Put (", integ: ");
@@ -706,11 +757,11 @@ package body Simul.Vhdl_Debug is
             Put (", len: ");
             Put_Uns32 (Q.Typ.W);
             Put (", Idx: ");
-            Put_Uns32 (Uns32 (Q.Idx));
+            Put_Uns32 (Uns32 (Q.Sq_Idx));
             Put (", val: ");
             Disp_Memtyp ((Q.Typ, Q.Val), Get_Type (Q.Decl));
             New_Line;
-            Info_Scalar_Quantity (Q.Idx, Q.Typ.W);
+            Info_Scalar_Quantity (Q.Sq_Idx, Q.Typ.W);
          end;
       end loop;
    end Info_Quantity_Proc;
@@ -804,18 +855,54 @@ package body Simul.Vhdl_Debug is
       Elab.Debugger.Prepare_Continue;
    end Run_Proc;
 
+   procedure Disp_Process (Idx : Process_Index_Type)
+   is
+      Proc : Proc_Record_Type renames Processes_Table.Table (Idx);
+   begin
+      Put_Uns32 (Uns32 (Idx));
+      Put (": ");
+      Disp_Instance_Path (Proc.Inst);
+      --  TODO: display label for non-process.
+      Put ("  (");
+      Put (Vhdl.Errors.Disp_Location (Proc.Proc));
+      Put_Line (")");
+   end Disp_Process;
+
    procedure Ps_Proc (Line : String)
    is
-      pragma Unreferenced (Line);
+      P, L : Positive;
+      Idx : Process_Index_Type;
+      Val : Uns32;
+      Valid : Boolean;
    begin
-      for I in Processes_Table.First .. Processes_Table.Last loop
-         Put_Uns32 (Uns32 (I));
-         Put (": ");
-         Disp_Instance_Path (Processes_Table.Table (I).Inst);
-         Put ("  (");
-         Put (Vhdl.Errors.Disp_Location (Processes_Table.Table (I).Proc));
-         Put_Line (")");
-      end loop;
+      Idx := No_Process_Index;
+
+      P := Skip_Blanks (Line);
+      if P <= Line'Last then
+         L := Get_Word (Line, P);
+         if Line (P .. L) = "-h" then
+            Put_Line ("ps [PROC]");
+            return;
+         elsif Line (P) in '0' .. '9' then
+            To_Num (Line (P .. L), Val, Valid);
+            if not Valid or else Val > Uns32 (Processes_Table.Last) then
+               Put_Line ("invalid process index");
+               return;
+            end if;
+            Idx := Process_Index_Type (Val);
+         else
+            Put_Line ("unknown option");
+            return;
+         end if;
+      end if;
+
+      if Idx = No_Process_Index then
+         for I in Processes_Table.First .. Processes_Table.Last loop
+            Disp_Process (I);
+         end loop;
+      else
+         Disp_Process (Idx);
+      end if;
    end Ps_Proc;
 
    procedure Trace_Proc (Line : String)

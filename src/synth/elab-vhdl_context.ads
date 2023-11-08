@@ -139,10 +139,16 @@ package Elab.Vhdl_Context is
    procedure Create_Component_Instance (Syn_Inst : Synth_Instance_Acc;
                                         Sub_Inst : Synth_Instance_Acc);
 
+   --  Create an instance for a package.
    procedure Create_Package_Object (Syn_Inst : Synth_Instance_Acc;
                                     Decl : Node;
                                     Inst : Synth_Instance_Acc;
                                     Is_Global : Boolean);
+
+   --  Mark the instance for the package as null.
+   --  This is the way to mark the package unused.
+   --  Only for a root package.
+   procedure Clear_Package_Object (Syn_Inst : Synth_Instance_Acc; Decl : Node);
 
    function Create_Package_Instance (Parent_Inst : Synth_Instance_Acc;
                                      Pkg : Node)
@@ -154,6 +160,9 @@ package Elab.Vhdl_Context is
 
    procedure Create_Subtype_Object
      (Syn_Inst : Synth_Instance_Acc; Decl : Node; Typ : Type_Acc);
+
+   procedure Create_Interface_Type
+     (Syn_Inst : Synth_Instance_Acc; Decl : Node; Typ : Type_Acc; Def : Node);
 
    --  Force the value of DECL, without checking for elaboration order.
    --  It is for deferred constants.
@@ -189,6 +198,12 @@ package Elab.Vhdl_Context is
    function Get_Subtype_Object
      (Syn_Inst : Synth_Instance_Acc; Decl : Node) return Type_Acc;
 
+   --  Return the actual type of an interface type.
+   procedure Get_Interface_Type (Syn_Inst : Synth_Instance_Acc;
+                                 Decl : Node;
+                                 Typ : out Type_Acc;
+                                 Def : out Node);
+
    function Get_Sub_Instance
      (Syn_Inst : Synth_Instance_Acc; Stmt : Node) return Synth_Instance_Acc;
    function Get_Component_Instance
@@ -198,6 +213,12 @@ package Elab.Vhdl_Context is
    procedure Set_Sub_Instance (Syn_Inst : Synth_Instance_Acc;
                                Stmt : Node;
                                Sub_Inst : Synth_Instance_Acc);
+
+   --  Return True iff declaration or statement N is elaborated.
+   --  SYN_INST must correspond to the instance for N.
+   --  Used to check external names.
+   function Is_Elaborated (Syn_Inst : Synth_Instance_Acc; N : Node)
+                          return Boolean;
 
    --  Return the scope of BLK.  Deals with architecture bodies.
    function Get_Info_Scope (Blk : Node) return Sim_Info_Acc;
@@ -229,10 +250,19 @@ private
 
    type Obj_Kind is
      (
+      --  Unused slot.
       Obj_None,
+
+      --  An object or a signal.
       Obj_Object,
+
+      --  A subtype indication.
       Obj_Subtype,
+
+      --  A sub-instance or a package.
       Obj_Instance,
+
+      --  Marker for for-loop.
       Obj_Marker
      );
 
@@ -244,6 +274,7 @@ private
             Obj : Valtyp;
          when Obj_Subtype =>
             T_Typ : Type_Acc;
+            T_Def : Node;
          when Obj_Instance =>
             I_Inst : Synth_Instance_Acc;
          when Obj_Marker =>

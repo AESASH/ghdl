@@ -39,6 +39,7 @@ package Synth.Vhdl_Stmts is
 
    --  Create a new Synth_Instance for calling subprogram IMP/BOD.
    function Synth_Subprogram_Call_Instance (Inst : Synth_Instance_Acc;
+                                            Call : Node;
                                             Imp : Node;
                                             Bod : Node)
                                            return Synth_Instance_Acc;
@@ -77,6 +78,7 @@ package Synth.Vhdl_Stmts is
    --  DEST_OFF is the offset, within DEST_DYN.
    --  DEST_DYN is set (Voff field set) when there is a non-static index.
    procedure Synth_Assignment_Prefix (Syn_Inst : Synth_Instance_Acc;
+                                      Pfx_Inst : Synth_Instance_Acc;
                                       Pfx : Node;
                                       Dest_Base : out Valtyp;
                                       Dest_Typ : out Type_Acc;
@@ -145,6 +147,8 @@ package Synth.Vhdl_Stmts is
                                         Stmt : Node);
    procedure Synth_Conditional_Variable_Assignment
      (Inst : Synth_Instance_Acc; Stmt : Node);
+   procedure Synth_Selected_Variable_Assignment
+     (Syn_Inst : Synth_Instance_Acc; Stmt : Node);
 
    procedure Synth_Procedure_Call (Syn_Inst : Synth_Instance_Acc; Stmt : Node);
    procedure Synth_Subprogram_Back_Association
@@ -167,10 +171,9 @@ package Synth.Vhdl_Stmts is
    --  Return the associated choice from CHOICES chain selected by SEL.
    --  It returns the choice (not the associated expression or chain) which
    --  carries the association.
-   function Execute_Static_Choices_Scalar
-     (Inst : Synth_Instance_Acc; Choices : Node; Sel : Int64) return Node;
+   function Execute_Static_Choices
+     (Inst : Synth_Instance_Acc; Choices : Node; Sel : Valtyp) return Node;
 
-   --  Return the statements chain to be executed.
    function Execute_Static_Case_Statement
      (Inst : Synth_Instance_Acc; Stmt : Node; Sel : Valtyp) return Node;
 
